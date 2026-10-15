@@ -161,7 +161,7 @@ pub(super) fn desktop() -> Result<()> {
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('%', "%%");
-    atomic_write(&desktop,format!("[Desktop Entry]\nType=Application\nName=Recall for Omarchy\nComment=Search local files by meaning\nExec=\"{desktop_exec}\" toggle\nIcon=io.github.ferdousbhai.Recall\nCategories=Utility;\nTerminal=false\n").as_bytes())?;
+    atomic_write(&desktop,format!("[Desktop Entry]\nType=Application\nName=Recall\nComment=Search local files by meaning\nExec=\"{desktop_exec}\" toggle\nIcon=io.github.ferdousbhai.Recall\nCategories=Utility;\nTerminal=false\n").as_bytes())?;
     let icon = data.join("icons/hicolor/scalable/apps/io.github.ferdousbhai.Recall.svg");
     fs::create_dir_all(icon.parent().unwrap())?;
     fs::copy(root.join("omarchy/assets/recall.svg"), icon)?;

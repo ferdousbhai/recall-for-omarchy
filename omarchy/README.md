@@ -1,4 +1,4 @@
-# Recall for Omarchy
+# Recall
 
 Recall has a native Rust CLI and coordinator, a QML desktop panel/settings form, and isolated Rust workers for indexing and search. llama.cpp supplies the C/C++ inference runtime. OCR uses Omarchy’s system Tesseract. Python is used only for development benchmarks/smoke scripts; there is no Python runtime requirement.
 

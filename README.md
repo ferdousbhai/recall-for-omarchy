@@ -1,4 +1,4 @@
-# Recall for Omarchy
+# Recall
 
 Search your files by what’s in them. A native Omarchy desktop app **with a CLI and a bundled skill, so coding agents can search your files too**.
 

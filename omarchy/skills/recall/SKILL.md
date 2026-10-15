@@ -1,6 +1,6 @@
 ---
 name: recall
-description: Search locally indexed documents, screenshots, photos, audio, video, and source code by meaning or exact text through the Recall for Omarchy CLI. Use to find a local file, passage, scene, recording interval, or function when its filename or location is unknown.
+description: Search locally indexed documents, screenshots, photos, audio, video, and source code by meaning or exact text through the Recall CLI. Use to find a local file, passage, scene, recording interval, or function when its filename or location is unknown.
 ---
 
 # Local search with Recall

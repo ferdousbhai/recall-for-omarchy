@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
   "id": "ferdous.recall",
-  "name": "Recall for Omarchy",
+  "name": "Recall",
   "version": "0.4.3",
   "author": "Ferdous Bhai",
   "description": "Local semantic search across documents, pictures, recordings and code",
   "kinds": ["panel", "bar-widget"],
   "keepLoaded": true,
   "entryPoints": {"panel": "SearchPanel.qml", "barWidget": "Widget.qml"},
-  "barWidget": {"displayName": "Recall for Omarchy", "category": "Tools", "allowMultiple": false, "defaultSection": "right"}
+  "barWidget": {"displayName": "Recall", "category": "Tools", "allowMultiple": false, "defaultSection": "right"}
 }
