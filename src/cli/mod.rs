@@ -159,6 +159,9 @@ pub fn is_readable(path: &Path) -> bool {
 
 /// The embedding runtime: EmbeddingGemma 2 on llama.cpp, in this process.
 pub fn make_embedder(text_only: bool, log: &Path) -> Result<Box<dyn Embedder>, WorkerError> {
+    if let Some(socket) = std::env::var_os("RECALL_SHARED_SOCKET") {
+        return Ok(Box::new(recall::shared::RemoteEmbedder::new(socket.into())));
+    }
     Ok(Box::new(LlamaEmbedder::new(&LlamaModels::locate()?, text_only, Some(log))?))
 }
 

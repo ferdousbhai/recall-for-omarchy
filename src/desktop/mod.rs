@@ -1,5 +1,6 @@
 mod daemon;
 mod install;
+mod shared;
 mod watcher;
 use anyhow::{bail, Context, Result};
 use recall::{model_files, paths};
@@ -64,9 +65,7 @@ pub(super) fn validate_config(value: &Value) -> Result<()> {
         .as_array()
         .context("excluded_types must be an array")?
     {
-        if ext.as_str().is_none_or(|s| {
-            s.is_empty() || !s.chars().all(|c| c.is_ascii_alphanumeric())
-        }) {
+        if ext.as_str().is_none_or(|s| s.is_empty() || !s.chars().all(|c| c.is_ascii_alphanumeric())) {
             bail!("Excluded extensions must contain letters/numbers without dots");
         }
     }
@@ -177,7 +176,7 @@ fn output(reply: Value) -> i32 {
         0
     }
 }
-const HELP: &str = "recall — local semantic search for files and code (JSON output)\n\nCommands:\n  search QUERY [--code] [--kind KIND] [--limit 1..100] [--keyword-only]\n  text SEGMENT_ID [--code]\n  status | doctor | pause | resume\n  models                              pinned model download manifest\n  settings | toggle\n  config [set KEY JSON_VALUE]\n  skill [install]\n  setup [--skip-ocr]\n  ocr                                 system OCR languages and availability\n\nExit codes: 0 success (including no matches), 1 runtime error, 2 invalid arguments.\nSearch requires recall-for-omarchy.service. Settings opens the native Omarchy panel.";
+const HELP: &str = "recall — local semantic search for files and code (JSON output)\n\nCommands:\n  search QUERY [--code] [--kind KIND] [--limit 1..100] [--keyword-only]\n  text SEGMENT_ID [--code]\n  status | doctor | pause | resume\n  capabilities                        shared API and model revision\n  rank COLLECTION QUERY               rank JSON records from stdin (32 MiB maximum)\n  forget COLLECTION                   delete that collection’s cached vectors\n  models                              pinned model download manifest\n  settings | toggle\n  config [set KEY JSON_VALUE]\n  skill [install]\n  setup [--skip-ocr]\n  ocr                                 system OCR languages and availability\n\nExit codes: 0 success (including no matches), 1 runtime error, 2 invalid arguments.\nSearch requires recall-for-omarchy.service. Settings opens the native Omarchy panel.";
 
 fn payload(args: &[String]) -> Result<Value> {
     let command = args.first().map(String::as_str).unwrap_or("");
@@ -293,6 +292,50 @@ pub fn run(args: Vec<String>) -> Result<i32> {
             }
             Ok(0)
         }
+        "capabilities" if args.len() == 1 => {
+            Ok(output(request(&json!({"api":1,"op":"capabilities"}))?))
+        }
+        "rank" if args.len() == 3 => {
+            let mut bytes = Vec::new();
+            const RECORD_LIMIT: usize = 32 * 1024 * 1024;
+            std::io::stdin()
+                .take(RECORD_LIMIT as u64 + 1)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() > RECORD_LIMIT {
+                bail!("Records are too large");
+            }
+            let value: Value = serde_json::from_slice(&bytes)?;
+            let records = value
+                .as_array()
+                .context("Supply a JSON array of records on stdin")?;
+            let mut hits = Vec::new();
+            for batch in records.chunks(32) {
+                let reply = request(
+                    &json!({"api":1,"op":"records.search","collection":args[1],"query":args[2],"records":batch,"limit":32}),
+                )?;
+                if reply.get("error").is_some() {
+                    return Ok(output(reply));
+                }
+                hits.extend(
+                    reply["hits"]
+                        .as_array()
+                        .context("Invalid ranking response")?
+                        .iter()
+                        .cloned(),
+                );
+            }
+            hits.sort_by(|a, b| {
+                b["score"]
+                    .as_f64()
+                    .unwrap_or(0.0)
+                    .total_cmp(&a["score"].as_f64().unwrap_or(0.0))
+            });
+            hits.truncate(100);
+            Ok(output(json!({"api":1,"meaning":true,"hits":hits})))
+        }
+        "forget" if args.len() == 2 => Ok(output(request(
+            &json!({"api":1,"op":"records.forget","collection":args[1]}),
+        )?)),
         "models" if args.len() == 1 => Ok(output(json!(model_files::ALL
             .iter()
             .map(|f| json!({"name":f.name,"bytes":f.bytes,"sha256":f.sha256,"url":f.url()}))

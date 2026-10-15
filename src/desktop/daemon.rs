@@ -52,6 +52,8 @@ type RpcMessage = (Value, mpsc::Sender<Result<Value>>);
 
 struct State {
     rpc_tx: mpsc::SyncSender<RpcMessage>,
+    shared: super::shared::Service,
+    model_requests: AtomicUsize,
     config: Mutex<Value>,
     status: Mutex<Value>,
     rpc: Mutex<Option<Rpc>>,
@@ -63,6 +65,7 @@ struct State {
 }
 fn launch(config: &Value, command: &str) -> Result<Command> {
     let mut cmd = Command::new(engine()?);
+    cmd.env("RECALL_SHARED_SOCKET", socket_path());
     cmd.arg(command)
         .args(["--index", config["index_directory"].as_str().unwrap()])
         .env(
@@ -147,6 +150,28 @@ impl State {
     fn dispatch(&self, value: &Value) -> Result<Value> {
         let op = value["op"].as_str().context("Missing operation")?;
         match op {
+            "capabilities" => Ok(
+                json!({"api":1,"operations":["embed","records.search","records.forget"],"source":recall::llama::model_info().vector_source(),"models_directory":self.config.lock().unwrap()["models_directory"],"batch_size":32}),
+            ),
+            "embed" | "records.search" | "records.forget" => {
+                let config = self.config.lock().unwrap().clone();
+                let result = self.shared.request(value, config);
+                if result
+                    .as_ref()
+                    .is_err_and(|e| e.to_string().starts_with("Recall models are not ready"))
+                {
+                    let media = value["kind"] == "image"
+                        || value["kind"] == "audio"
+                        || value["records"].as_array().is_some_and(|r| {
+                            r.iter()
+                                .any(|v| v["kind"] == "image" || v["kind"] == "audio")
+                        });
+                    self.model_requests
+                        .fetch_or(if media { 3 } else { 1 }, Ordering::Release);
+                }
+                result
+            }
+
             "status" => {
                 let mut s = self.status.lock().unwrap().clone();
                 let config = self.config.lock().unwrap();
@@ -455,24 +480,62 @@ fn download(state: Arc<State>) {
     thread::spawn(move || loop {
         let config = state.config.lock().unwrap().clone();
         let folder = Path::new(config["models_directory"].as_str().unwrap());
-        let missing = model_files::missing(folder);
-        if missing.is_empty() {
-            state.status.lock().unwrap()["download"] = json!("ready");
-            thread::sleep(Duration::from_secs(5));
-            continue;
-        }
-        if folders(&config, "roots").is_empty() && folders(&config, "code_roots").is_empty() {
-            state.status.lock().unwrap()["download"] = json!("needed");
+        let wanted = if !folders(&config, "roots").is_empty()
+            || !folders(&config, "code_roots").is_empty()
+        {
+            3
+        } else {
+            state.model_requests.load(Ordering::Acquire)
+        };
+        let missing: Vec<_> = model_files::missing(folder)
+            .into_iter()
+            .filter(|f| {
+                wanted
+                    & if f.name == model_files::TEXT.name {
+                        1
+                    } else {
+                        2
+                    }
+                    != 0
+            })
+            .collect();
+        if wanted == 0 || missing.is_empty() {
+            state.status.lock().unwrap()["download"] = json!(if wanted == 0 && !model_files::missing(folder).is_empty() {
+                    "needed"
+                } else {
+                    "ready"
+                });
             thread::sleep(Duration::from_secs(5));
             continue;
         }
         state.status.lock().unwrap()["download"] = json!("downloading");
         let result = (|| -> Result<()> {
             fs::create_dir_all(folder)?;
+            let lock = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .mode(0o600)
+                .open(folder.join(".download.lock"))?;
+            if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
+                return Err(io::Error::last_os_error().into());
+            }
             for file in missing {
+                if folder.join(file.name).is_file() {
+                    continue;
+                }
                 let temporary = folder.join(format!("{}.part", file.name));
                 if let Some(cached) = model_files::cached_copy(&file) {
-                    fs::copy(cached, &temporary)?;
+                    if model_files::sha256(&cached)? != file.sha256 {
+                        bail!("Cached model checksum verification failed");
+                    }
+                    if temporary.exists() {
+                        fs::remove_file(&temporary)?;
+                    }
+                    if fs::hard_link(&cached, &temporary).is_err() {
+                        fs::copy(cached, &temporary)?;
+                    }
                 } else {
                     checked(
                         Command::new("curl")
@@ -553,6 +616,8 @@ pub(super) fn run() -> Result<i32> {
     let (rpc_tx, rpc_rx) = mpsc::sync_channel::<RpcMessage>(32);
     let state = Arc::new(State {
         rpc_tx,
+        shared: super::shared::Service::start(),
+        model_requests: AtomicUsize::new(0),
         config: Mutex::new(config.clone()),
         status: Mutex::new(
             json!({"line":"Starting…","download":"needed","paused":false,"files":0,"searchable":0,"pending":0,"code_files":0,"code_pending":0}),
@@ -654,6 +719,11 @@ pub(super) fn run() -> Result<i32> {
                 let mut reply = state
                     .dispatch(&value)
                     .unwrap_or_else(|e| json!({"error":e.to_string()}));
+                if ["capabilities", "embed", "records.search", "records.forget"]
+                    .contains(&value["op"].as_str().unwrap_or(""))
+                {
+                    reply["api"] = json!(1);
+                }
                 reply["id"] = value.get("id").cloned().unwrap_or(Value::Null);
                 if writeln!(reader.get_mut(), "{reply}").is_err() {
                     break;

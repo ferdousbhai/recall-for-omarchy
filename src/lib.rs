@@ -23,3 +23,5 @@ pub mod store;
 pub mod text;
 pub mod tools;
 pub mod vectors;
+
+pub mod shared;

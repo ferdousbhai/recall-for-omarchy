@@ -64,3 +64,5 @@ omarchy/bundle.sh
 ## Credits and license
 
 Based on [Recall by pdstn12](https://github.com/pdstn12/Recall), inspired by [DigUp by Abdur Rahim](https://github.com/ARahim3/DigUp). The Rust indexing/retrieval engine comes from Recall. This fork adds a native Rust CLI/coordinator and QML settings, alongside the native Omarchy panel, bar integration, bundled agent skill, packaging, and ARM fixes. MIT; see LICENSE and THIRD_PARTY_NOTICES.md. Upstream documentation: [pdstn12/Recall](https://github.com/pdstn12/Recall#readme).
+
+Other local apps can use the [optional shared inference API](docs/shared-inference.md) with native text-search fallbacks. Recall alone owns the model cache and inference worker.

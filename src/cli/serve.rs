@@ -328,7 +328,7 @@ impl Service {
 
     fn query_encoder(&mut self) -> Result<Option<&mut Box<dyn Embedder>>> {
         if self.encoder.is_none() {
-            if LlamaModels::locate().is_err() {
+            if std::env::var_os("RECALL_SHARED_SOCKET").is_none() && LlamaModels::locate().is_err() {
                 self.encoder_failed = Some("the model isn't downloaded yet".into());
                 return Ok(None);
             }

@@ -243,7 +243,7 @@ impl LlamaEmbedder {
         }
         // One input must fit one micro-batch: 2048 tokens (the reference's cut), which also holds a 1120-token image or
         // a 750-token 30 s clip. Queries are short, so the query encoder reserves less and cuts at 512.
-        let max_tokens = if text_only { 512 } else { 2048 };
+        let max_tokens = if text_only && std::env::var_os("RECALL_SHARED_INFERENCE").is_none() { 512 } else { 2048 };
         let text = path_cstring(&models.text);
         let media = if text_only { None } else { models.media.as_deref().map(path_cstring) };
         let mut error = [0 as c_char; 512];

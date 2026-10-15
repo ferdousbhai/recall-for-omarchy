@@ -4,6 +4,7 @@
 use std::fmt;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
+use std::os::fd::AsRawFd;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -52,7 +53,7 @@ impl fmt::Display for WorkerError {
 impl std::error::Error for WorkerError {}
 
 /// One embedding (or why the file couldn't be embedded).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Embedding {
     pub vector: Option<Vec<f32>>,
     pub error: Option<String>,
@@ -202,16 +203,28 @@ impl EmbeddingWorker {
     }
 
     fn read_reply(&mut self) -> Result<Reply, WorkerError> {
+        let deadline = Instant::now() + Duration::from_secs(110);
+        let mut line = Vec::new();
         loop {
-            let mut line = String::new();
-            let read = self.output.read_line(&mut line).unwrap_or(0);
-            if read == 0 {
+            if self.output.buffer().is_empty() {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                let mut fd = libc::pollfd { fd: self.output.get_ref().as_raw_fd(), events: libc::POLLIN, revents: 0 };
+                let ready = unsafe { libc::poll(&mut fd, 1, remaining.as_millis().min(i32::MAX as u128) as i32) };
+                if ready <= 0 { return Err(WorkerError::Failed("worker reply timed out".into())); }
+            }
+            let buffer = self.output.fill_buf().map_err(|error| WorkerError::Failed(error.to_string()))?;
+            if buffer.is_empty() {
                 return Err(WorkerError::Died(format!("exited{}", self.log_tail())));
             }
-            if line.trim().is_empty() {
-                continue;
+            let end = buffer.iter().position(|b| *b == b'\n').map(|i| i + 1);
+            let count = end.unwrap_or(buffer.len());
+            line.extend_from_slice(&buffer[..count]);
+            self.output.consume(count);
+            if line.len() > 10 * 1024 * 1024 { return Err(WorkerError::Failed("worker reply too large".into())); }
+            if end.is_some() {
+                if line.iter().all(u8::is_ascii_whitespace) { line.clear(); continue; }
+                return serde_json::from_slice(&line).map_err(|error| WorkerError::Failed(format!("bad reply: {error}")));
             }
-            return serde_json::from_str(&line).map_err(|error| WorkerError::Failed(format!("bad reply: {error}")));
         }
     }
 
