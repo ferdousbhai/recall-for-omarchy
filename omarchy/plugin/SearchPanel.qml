@@ -4,7 +4,7 @@ import Quickshell.Wayland
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import qs.Commons
+import qs.Commons as Theme
 
 Item {
   id: root
@@ -94,101 +94,220 @@ Item {
     WlrLayershell.namespace: "recall-for-omarchy"
     WlrLayershell.layer: WlrLayer.Overlay
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
-    Rectangle { anchors.fill: parent; color: "#66000000"; MouseArea { anchors.fill: parent; onClicked: root.close() } }
+    Rectangle { anchors.fill: parent; color: "#88000000"; MouseArea { anchors.fill: parent; onClicked: root.close() } }
     Rectangle {
+      id: panel
       anchors.centerIn: parent
-      width: Math.min(860, parent.width - 64)
-      height: Math.min(680, parent.height - 64)
-      color: Color.menu.background
-      border.color: Color.menu.border
-      border.width: 2
-      radius: 14
-      MouseArea { anchors.fill: parent; onClicked: query.forceActiveFocus() }
+      width: Math.min(880, parent.width - 40)
+      height: Math.min(650, parent.height - 40)
+      color: Theme.Color.menu.background
+      border.color: Qt.alpha(Theme.Color.menu.text, 0.22)
+      border.width: 1
+      radius: 12
       ColumnLayout {
         anchors.fill: parent
-        anchors.margins: 24
-        spacing: 12
+        anchors.margins: 1
+        spacing: 0
         RowLayout {
           Layout.fillWidth: true
-          Text { text: "Recall"; color: Color.menu.text; font.pixelSize: 23; font.bold: true }
+          Layout.preferredHeight: 60
+          Layout.leftMargin: 22
+          Layout.rightMargin: 14
+          spacing: 10
+          RecallIcon { name: "search"; ink: Theme.Color.menu.selectedText; Layout.preferredWidth: 22; Layout.preferredHeight: 22 }
+          Text { text: "Recall"; color: Theme.Color.menu.text; font.pixelSize: 18; font.weight: Font.DemiBold; font.family: Theme.Style.fontFamily }
+          Text { visible: panel.width >= 500; text: root.showSettings ? "/ Settings" : "/ Search"; color: Qt.alpha(Theme.Color.menu.text, 0.45); font.pixelSize: 12; font.family: Theme.Style.fontFamily }
           Item { Layout.fillWidth: true }
-          Button { text: root.paused ? "Resume indexing" : "Pause indexing"; onClicked: { root.send("pause", {paused: !root.paused}); root.send("status") } }
-          Button { text: root.showSettings ? "Back to search" : "Settings"; onClicked: { root.showSettings = !root.showSettings; if (root.showSettings) root.send("config"); else query.forceActiveFocus() } }
+          RecallButton { iconName: root.paused ? "play" : "pause"; compact: true; hint: root.paused ? "Resume indexing" : "Pause indexing"; onClicked: { root.send("pause", {paused: !root.paused}); root.send("status") } }
+          RecallButton { iconName: root.showSettings ? "search" : "settings"; compact: true; hint: root.showSettings ? "Back to search" : "Settings"; onClicked: { root.showSettings = !root.showSettings; if (root.showSettings) root.send("config"); else query.forceActiveFocus() } }
+          Rectangle { Layout.preferredWidth: 1; Layout.preferredHeight: 18; color: Qt.alpha(Theme.Color.menu.text, 0.12) }
+          RecallButton { iconName: "close"; compact: true; hint: "Close · Esc"; onClicked: root.close() }
         }
-        TextField {
-          id: query
+        Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Qt.alpha(Theme.Color.menu.text, 0.1) }
+        Rectangle {
           visible: !root.showSettings
           Layout.fillWidth: true
-          placeholderText: "Describe a file, scene, or moment…  ·  code: search by intent"
-          font.pixelSize: 18
-          onTextChanged: { root.notice = ""; debounce.restart() }
-          Keys.onEscapePressed: root.close()
-          Keys.onDownPressed: { root.selected = Math.min(root.hits.length - 1, root.selected + 1); list.positionViewAtIndex(root.selected, ListView.Contain) }
-          Keys.onUpPressed: { root.selected = Math.max(0, root.selected - 1); list.positionViewAtIndex(root.selected, ListView.Contain) }
-          Keys.onReturnPressed: function(event) { root.activate((event.modifiers & Qt.ControlModifier) !== 0) }
-          Keys.onEnterPressed: function(event) { root.activate((event.modifiers & Qt.ControlModifier) !== 0) }
+          Layout.preferredHeight: 54
+          Layout.margins: 18
+          radius: 7
+          color: Qt.alpha(Theme.Color.menu.text, 0.025)
+          border.width: 1
+          border.color: query.activeFocus ? Qt.alpha(Theme.Color.menu.selectedText, 0.7) : Qt.alpha(Theme.Color.menu.text, 0.2)
+          RowLayout {
+            anchors.fill: parent
+            anchors.leftMargin: 16
+            anchors.rightMargin: 12
+            spacing: 12
+            RecallIcon { name: "search"; ink: query.activeFocus ? Theme.Color.menu.selectedText : Qt.alpha(Theme.Color.menu.text, 0.5) }
+            TextField {
+              id: query
+              objectName: "recallQuery"
+              Layout.fillWidth: true
+              Layout.fillHeight: true
+              padding: 0
+              color: Theme.Color.menu.text
+              placeholderTextColor: Qt.alpha(Theme.Color.menu.text, 0.4)
+              selectionColor: Theme.Color.menu.selectedBackground
+              selectedTextColor: Theme.Color.menu.text
+              background: Item {}
+              placeholderText: "Find a file by what’s in it…"
+              font.pixelSize: 16
+              font.family: Theme.Style.fontFamily
+              selectByMouse: true
+              onTextChanged: { root.notice = ""; debounce.restart() }
+              Keys.onEscapePressed: root.close()
+              Keys.onDownPressed: { root.selected = Math.min(root.hits.length - 1, root.selected + 1); list.positionViewAtIndex(root.selected, ListView.Contain) }
+              Keys.onUpPressed: { root.selected = Math.max(0, root.selected - 1); list.positionViewAtIndex(root.selected, ListView.Contain) }
+              Keys.onReturnPressed: function(event) { root.activate((event.modifiers & Qt.ControlModifier) !== 0) }
+              Keys.onEnterPressed: function(event) { root.activate((event.modifiers & Qt.ControlModifier) !== 0) }
+            }
+            RecallButton { visible: query.text.length > 0; iconName: "close"; compact: true; hint: "Clear search"; onClicked: { query.clear(); query.forceActiveFocus() } }
+          }
+          Rectangle {
+            visible: root.searching
+            anchors.bottom: parent.bottom
+            height: 2
+            width: parent.width * 0.25
+            radius: 1
+            color: Theme.Color.menu.selectedText
+            SequentialAnimation on x {
+              running: root.searching && root.opened && !root.showSettings
+              loops: Animation.Infinite
+              NumberAnimation { from: 0; to: panel.width - 240; duration: 900; easing.type: Easing.InOutSine }
+              NumberAnimation { from: panel.width - 240; to: 0; duration: 900; easing.type: Easing.InOutSine }
+            }
+          }
         }
-        Text { text: root.status; color: Color.menu.text; opacity: 0.7; font.pixelSize: 12; Layout.fillWidth: true; elide: Text.ElideRight }
+        RowLayout {
+          visible: !root.showSettings
+          Layout.fillWidth: true
+          Layout.leftMargin: 24
+          Layout.rightMargin: 24
+          Layout.bottomMargin: 10
+          Text { text: query.text.trim() ? (root.searching ? "SEARCHING" : root.hits.length + " RESULTS") : "YOUR FILES, WITH CONTEXT"; color: Qt.alpha(Theme.Color.menu.text, 0.45); font.pixelSize: 10; font.letterSpacing: 1.2; font.family: Theme.Style.fontFamily }
+          Item { Layout.fillWidth: true }
+          Text { text: "Local & private"; color: Qt.alpha(Theme.Color.menu.text, 0.45); font.pixelSize: 11; font.family: Theme.Style.fontFamily }
+        }
         SettingsForm {
           id: settingsForm
+          objectName: "recallSettings"
           visible: root.showSettings
           Layout.fillWidth: true
           Layout.fillHeight: true
+          Layout.margins: 22
           onSaveRequested: function(settings) { root.settingsSave = root.send("configure", {config: settings}) }
           Keys.onEscapePressed: root.close()
         }
         ListView {
           id: list
+          objectName: "recallResults"
           visible: !root.showSettings
           Layout.fillWidth: true
           Layout.fillHeight: true
+          Layout.leftMargin: 12
+          Layout.rightMargin: 12
+          Layout.bottomMargin: 12
           clip: true
-          spacing: 6
+          spacing: 3
           model: root.hits
+          ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
           delegate: Rectangle {
+            id: result
             required property var modelData
             required property int index
+            readonly property bool current: index === root.selected
             width: list.width
-            height: 94
-            radius: 8
-            color: index === root.selected ? Color.menu.selectedBackground : "transparent"
+            height: 82
+            radius: 7
+            color: current ? Theme.Color.menu.selectedBackground : pointer.containsMouse ? Qt.alpha(Theme.Color.menu.text, 0.04) : "transparent"
+            Behavior on color { ColorAnimation { duration: 90 } }
+            Rectangle { visible: result.current; anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter; width: 2; height: 30; radius: 1; color: Theme.Color.menu.selectedText }
             RowLayout {
               anchors.fill: parent
-              anchors.margins: 10
-              spacing: 12
-              Image {
-                Layout.preferredWidth: 68
-                Layout.preferredHeight: 68
-                source: ["image", "screenshot"].indexOf(modelData.kind) >= 0 ? "file://" + encodeURI(modelData.path).replace(/#/g, "%23") : ""
-                sourceSize.width: 136
-                sourceSize.height: 136
-                fillMode: Image.PreserveAspectFit
-                asynchronous: true
-                visible: source !== ""
+              anchors.leftMargin: 14
+              anchors.rightMargin: 14
+              spacing: 14
+              Rectangle {
+                Layout.preferredWidth: 48
+                Layout.preferredHeight: 48
+                radius: 7
+                color: Qt.alpha(Theme.Color.menu.text, 0.04)
+                border.color: Qt.alpha(Theme.Color.menu.text, 0.06)
+                RecallIcon { anchors.centerIn: parent; width: 23; height: 23; name: result.modelData.kind; ink: result.current ? Theme.Color.menu.selectedText : Qt.alpha(Theme.Color.menu.text, 0.55); visible: thumbnail.status !== Image.Ready }
+                Image {
+                  id: thumbnail
+                  anchors.fill: parent
+                  anchors.margins: 3
+                  source: ["image", "screenshot"].indexOf(result.modelData.kind) >= 0 ? "file://" + encodeURI(result.modelData.path).replace(/#/g, "%23").replace(/\?/g, "%3F") : ""
+                  sourceSize.width: 96
+                  sourceSize.height: 96
+                  fillMode: Image.PreserveAspectFit
+                  asynchronous: true
+                }
               }
               ColumnLayout {
                 Layout.fillWidth: true
-                spacing: 4
-                Text { text: modelData.name + (modelData.location ? "  ·  " + modelData.location : ""); color: Color.menu.text; font.bold: true; font.pixelSize: 15; Layout.fillWidth: true; elide: Text.ElideRight; textFormat: Text.PlainText }
-                Text { text: modelData.excerpt || modelData.kind; color: Color.menu.text; opacity: 0.85; font.pixelSize: 12; Layout.fillWidth: true; elide: Text.ElideRight; textFormat: Text.PlainText }
-                Text { text: modelData.folder; color: Color.menu.text; opacity: 0.55; font.pixelSize: 11; Layout.fillWidth: true; elide: Text.ElideMiddle; textFormat: Text.PlainText }
+                spacing: 5
+                RowLayout {
+                  Layout.fillWidth: true
+                  Text { text: result.modelData.name; color: Theme.Color.menu.text; font.weight: Font.Medium; font.pixelSize: 14; font.family: Theme.Style.fontFamily; Layout.fillWidth: true; elide: Text.ElideRight; textFormat: Text.PlainText }
+                  Text { text: result.modelData.location || result.modelData.kind; color: Qt.alpha(Theme.Color.menu.text, 0.5); font.pixelSize: 11; font.family: Theme.Style.fontFamily; Layout.maximumWidth: 160; elide: Text.ElideRight; textFormat: Text.PlainText }
+                }
+                Text { text: result.modelData.excerpt || result.modelData.kind; color: Qt.alpha(Theme.Color.menu.text, 0.7); font.pixelSize: 12; font.family: Theme.Style.fontFamily; Layout.fillWidth: true; elide: Text.ElideRight; textFormat: Text.PlainText }
+                Text { text: result.modelData.folder; color: Qt.alpha(Theme.Color.menu.text, 0.4); font.pixelSize: 11; font.family: Theme.Style.fontFamily; Layout.fillWidth: true; elide: Text.ElideMiddle; textFormat: Text.PlainText }
               }
+              RecallIcon { name: "arrow"; ink: Theme.Color.menu.selectedText; opacity: result.current ? 1 : 0; Layout.preferredWidth: 17; Layout.preferredHeight: 17 }
             }
-            MouseArea { anchors.fill: parent; onClicked: { root.selected = index; query.forceActiveFocus() }
+            MouseArea { id: pointer; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.selected = index; query.forceActiveFocus() }
               onDoubleClicked: { root.selected = index; root.activate(false) } }
           }
-          Text {
+          ColumnLayout {
             anchors.centerIn: parent
+            width: Math.min(420, parent.width - 32)
             visible: !root.hits.length
-            text: root.searching ? "Searching…" : query.text.trim() ? "No matches yet" : "Search your files by what’s in them.\nUse code: for your projects."
-            color: Color.menu.text
-            opacity: 0.65
-            horizontalAlignment: Text.AlignHCenter
+            spacing: 14
+            Rectangle {
+              Layout.alignment: Qt.AlignHCenter
+              Layout.preferredWidth: 58
+              Layout.preferredHeight: 58
+              radius: 16
+              color: Qt.alpha(Theme.Color.menu.selectedText, 0.07)
+              RecallIcon { anchors.centerIn: parent; width: 26; height: 26; ink: Qt.alpha(Theme.Color.menu.selectedText, 0.8) }
+            }
+            Text { text: root.searching ? "Finding the right moment…" : query.text.trim() ? "No matches found" : "Remember the detail. Find the file."; color: Theme.Color.menu.text; font.pixelSize: 16; font.weight: Font.Medium; font.family: Theme.Style.fontFamily; Layout.fillWidth: true; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.Wrap }
+            Text { text: root.searching ? "Searching your selected folders" : query.text.trim() ? "Try a different detail, phrase, or filename." : "Describe a document, a photo, or a moment in a recording."; color: Qt.alpha(Theme.Color.menu.text, 0.5); font.pixelSize: 12; font.family: Theme.Style.fontFamily; Layout.fillWidth: true; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.Wrap }
+            RowLayout {
+              visible: !query.text.trim() && list.width >= 400
+              Layout.alignment: Qt.AlignHCenter
+              Layout.topMargin: 8
+              spacing: 8
+              Repeater {
+                model: ["a scanned receipt", "code: retry logic"]
+                RecallButton { required property string modelData; text: modelData; onClicked: { query.text = modelData; query.forceActiveFocus() } }
+              }
+            }
           }
         }
-        Text { text: root.notice; color: Color.menu.text; opacity: 0.75; font.pixelSize: 12; Layout.fillWidth: true; elide: Text.ElideRight }
-        Button { visible: root.showSettings; text: "Save settings"; onClicked: settingsForm.save() }
-        Text { visible: !root.showSettings; text: "↑ ↓ Select    Enter Open    Ctrl+Enter Reveal    Esc Close     ·     Everything stays on this computer"; color: Color.menu.text; opacity: 0.6; font.pixelSize: 11 }
+        Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Qt.alpha(Theme.Color.menu.text, 0.1) }
+        RowLayout {
+          Layout.fillWidth: true
+          Layout.preferredHeight: 35
+          Layout.leftMargin: 22
+          Layout.rightMargin: 22
+          spacing: 8
+          Rectangle { Layout.preferredWidth: 5; Layout.preferredHeight: 5; radius: 3; color: root.paused ? Qt.alpha(Theme.Color.menu.text, 0.4) : Theme.Color.menu.selectedText }
+          Text { text: root.status; color: Qt.alpha(Theme.Color.menu.text, 0.5); font.pixelSize: 11; font.family: Theme.Style.fontFamily; Layout.fillWidth: true; elide: Text.ElideRight; textFormat: Text.PlainText }
+          Text { visible: !root.showSettings; text: panel.width >= 640 ? "↑ ↓  Select     ↵  Open     Ctrl ↵  Reveal     Esc  Close" : "↵  Open    Esc  Close"; color: Qt.alpha(Theme.Color.menu.text, 0.45); font.pixelSize: 11; font.family: Theme.Style.fontFamily }
+        }
+        RowLayout {
+          visible: root.showSettings || root.notice.length > 0
+          Layout.fillWidth: true
+          Layout.leftMargin: 22
+          Layout.rightMargin: 18
+          Layout.bottomMargin: 12
+          Text { text: root.notice; color: Theme.Color.menu.text; font.pixelSize: 11; font.family: Theme.Style.fontFamily; Layout.fillWidth: true; elide: Text.ElideRight; textFormat: Text.PlainText }
+          RecallButton { visible: root.showSettings; text: "Save settings"; primary: true; onClicked: settingsForm.save() }
+        }
       }
     }
   }
