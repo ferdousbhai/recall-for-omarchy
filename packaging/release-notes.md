@@ -1,11 +1,9 @@
-Recall for Omarchy v0.4.3 improves installation safety and introduces signed releases.
+Recall for Omarchy v0.5.0 shares one local embedding service across desktop apps and reads Office documents without external tools.
 
-- Release bundles for x86_64 and aarch64, plus install.sh, are signed with keyless Sigstore through this repository’s GitHub release workflow. Verification instructions are in README.md.
-- The installer lists packages and asks before installing them. Use --yes or RECALL_YES=1 for unattended installation.
-- Desktop setup backs up keybindings and restores them when Hyprland reports configuration errors. Set RECALL_NO_KEYBINDING=1 to skip adding the shortcut.
-- Desktop entries use the fork’s app ID; setup removes entries created under the previous ID.
-- Invalid configuration is rejected before saving. Reader panics are recorded as failed batches so indexing can continue.
-- Rust 1.89 is the minimum supported version, with CI on both 1.89 and stable.
+- Other local apps can rank their own records through Recall's owner-only socket (`records.search`, `records.forget`, `recall rank`, `recall forget`), keeping their native text search as a fallback. Recall alone owns the model cache and the inference worker; its own indexing uses the same worker. See docs/shared-inference.md.
+- DOCX, ODT, PPTX and XLSX are read in-process, so `zip` and `unzip` are no longer needed. ZIP checksums are verified, and extraction bounds metadata, XML scanning, worksheet rows and shared strings so a large compressed workbook cannot exhaust memory.
+- Long documents are chunked without holding an index of the whole text.
+- The app is shown as "Recall", with refined search and settings styling.
 
 Existing indexes, models, and selected folders are preserved. OCR continues to use system Tesseract; CPU fallback and Vulkan acceleration remain available on both architectures.
 
