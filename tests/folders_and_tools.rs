@@ -173,17 +173,17 @@ fn poppler_reads_pages_and_title() {
     assert!(page.exists());
 }
 
-/// A zip of `members` (name, text), made with the zip tool; None without it.
-fn zipped(base: &Path, name: &str, members: &[(&str, &str)]) -> Option<PathBuf> {
-    tools::path("zip")?;
-    let parts = base.join(format!("{name}.parts"));
-    for (member, text) in members {
-        write(&parts, member, text);
-    }
+/// A real deflated Office archive; fixtures don't depend on a system zip tool.
+fn zipped(base: &Path, name: &str, members: &[(&str, &str)]) -> PathBuf {
+    use std::io::Write;
     let out = base.join(name);
-    let names: Vec<&str> = members.iter().map(|(member, _)| *member).collect();
-    let made = std::process::Command::new("zip").arg("-q").arg(&out).args(&names).current_dir(&parts).status().ok()?;
-    made.success().then_some(out)
+    let mut archive = zip::ZipWriter::new(std::fs::File::create(&out).unwrap());
+    for (member, text) in members {
+        archive.start_file(*member, zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated)).unwrap();
+        archive.write_all(text.as_bytes()).unwrap();
+    }
+    archive.finish().unwrap();
+    out
 }
 
 #[test]
@@ -194,16 +194,14 @@ fn slides_come_in_the_decks_order_with_their_notes() {
     };
     let first = slide("Q3 budget review");
     let second = slide("Risks");
-    let Some(deck) = zipped(&base, "deck.pptx", &[
+    let deck = zipped(&base, "deck.pptx", &[
         ("ppt/presentation.xml", r#"<p:presentation><p:sldIdLst><p:sldId id="256" r:id="rId3"/><p:sldId id="257" r:id="rId2"/></p:sldIdLst></p:presentation>"#),
         ("ppt/_rels/presentation.xml.rels", r#"<Relationships><Relationship Id="rId2" Type="http://x/slide" Target="slides/slide1.xml"/><Relationship Id="rId3" Type="http://x/slide" Target="/ppt/slides/slide2.xml"/></Relationships>"#),
         ("ppt/slides/slide1.xml", &first),
         ("ppt/slides/slide2.xml", &second),
         ("ppt/slides/_rels/slide1.xml.rels", r#"<Relationships><Relationship Id="rId1" Type="http://x/relationships/notesSlide" Target="../notesSlides/notesSlide1.xml"/></Relationships>"#),
         ("ppt/notesSlides/notesSlide1.xml", r#"<p:notes><a:p><a:r><a:t>Mention the Lyon lease</a:t></a:r></a:p><a:p><a:fld type="slidenum"><a:t>2</a:t></a:fld></a:p></p:notes>"#),
-    ]) else {
-        return eprintln!("skipped: no zip tool");
-    };
+    ]);
     assert_eq!(
         recall::docs::text_of(&deck).unwrap(),
         "Slide 1\nRisks\nsecond line\n& more\n\nSlide 2\nQ3 budget review\nsecond line\n& more\nNotes: Mention the Lyon lease"
@@ -213,7 +211,7 @@ fn slides_come_in_the_decks_order_with_their_notes() {
 #[test]
 fn spreadsheet_rows_read_under_their_headers() {
     let (_dir, base) = folder();
-    let Some(book) = zipped(&base, "book.xlsx", &[
+    let book = zipped(&base, "book.xlsx", &[
         ("xl/workbook.xml", r#"<workbook><sheets><sheet name="Invoices" sheetId="1" r:id="rId1"/><sheet name="Secret" sheetId="2" state="hidden" r:id="rId2"/><sheet name="Readings" sheetId="3" r:id="rId3"/></sheets></workbook>"#),
         ("xl/_rels/workbook.xml.rels", r#"<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Target="worksheets/sheet3.xml"/></Relationships>"#),
         ("xl/sharedStrings.xml", r#"<sst><si><t>Invoice</t></si><si><t>Client</t></si><si><t>Due</t></si><si><r><t>INV-</t></r><r><t>2026-0187</t></r></si><si><t>Globex &amp; Co</t><rPh><t>x</t></rPh></si></sst>"#),
@@ -221,9 +219,7 @@ fn spreadsheet_rows_read_under_their_headers() {
         ("xl/worksheets/sheet1.xml", r#"<worksheet><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c><c r="D1" t="s"><v>2</v></c></row><row r="2"><c r="A2" t="s"><v>3</v></c><c r="B2" t="s"><v>4</v></c><c r="C2"><v>4200.5</v></c><c r="D2" s="1" t="n"><v>46310</v></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>INV-2026-0188</t></is></c><c r="D3" s="2"><v>46310.5</v></c><c r="E3" t="e"><v>#REF!</v></c></row></sheetData></worksheet>"#),
         ("xl/worksheets/sheet2.xml", r#"<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>hidden</t></is></c></row></sheetData></worksheet>"#),
         ("xl/worksheets/sheet3.xml", r#"<worksheet><sheetData><row r="1"><c r="A1"><v>1</v></c><c r="B1"><v>2.5</v></c></row><row r="2"><c r="A2"><v>2</v></c><c r="B2" t="b"><v>1</v></c></row></sheetData></worksheet>"#),
-    ]) else {
-        return eprintln!("skipped: no zip tool");
-    };
+    ]);
     assert_eq!(
         recall::docs::text_of(&book).unwrap(),
         "Sheet: Invoices\nColumns: Invoice · Client · Due\n\
@@ -238,9 +234,7 @@ fn zipped_documents_are_estimated_by_their_text() {
     let (_dir, base) = folder();
     let words = "<a:p><a:r><a:t>words</a:t></a:r></a:p>".repeat(100);
     let picture = "x".repeat(5_000_000);
-    let Some(deck) = zipped(&base, "deck.pptx", &[("ppt/slides/slide1.xml", &words), ("ppt/media/image1.png", &picture)]) else {
-        return eprintln!("skipped: no zip tool");
-    };
+    let deck = zipped(&base, "deck.pptx", &[("ppt/slides/slide1.xml", &words), ("ppt/media/image1.png", &picture)]);
     let size = recall::docs::zipped_text_size(&deck).unwrap();
     assert!(size > 0 && size < 2000, "{size}");
 }

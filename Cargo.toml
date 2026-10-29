@@ -20,6 +20,7 @@ anyhow = "1"
 base64 = "0.22"
 half = "2"
 libc = "0.2"
+quick-xml = { version = "0.41", default-features = false }
 regex = "1"
 rusqlite = { version = "0.35", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
@@ -29,6 +30,7 @@ unicode-general-category = "1"
 unicode-normalization = "0.1"
 unicode-segmentation = "1"
 uuid = { version = "1", features = ["v4"] }
+zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [build-dependencies]
 cc = "1"

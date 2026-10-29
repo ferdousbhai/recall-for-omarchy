@@ -57,12 +57,12 @@ On Linux, also
 ================================================================================
 
 The engine's Rust crates (rusqlite with SQLite, serde, serde_json, regex, half, sha2, base64, uuid, libc,
-anyhow, unicode-normalization, unicode-segmentation, unicode-general-category, cc): MIT or Apache License
+anyhow, unicode-normalization, unicode-segmentation, unicode-general-category, cc, zip, quick-xml): MIT or Apache License
 2.0 (SQLite: public domain). `cargo tree` lists them with their versions.
 
 Tesseract (https://github.com/tesseract-ocr/tesseract), Apache License 2.0, is
 used as a separate system program for OCR and is not included.
 
-ffmpeg, poppler, libvips, unzip and catdoc are used as separate programs from the
+ffmpeg, poppler, libvips and catdoc are used as separate programs from the
 system and are not included.
 ```

@@ -9,13 +9,16 @@ use std::sync::LazyLock;
 use regex::Regex;
 use unicode_segmentation::UnicodeSegmentation;
 
+mod office;
+use office::{Archive, Elements};
+
 use crate::rules;
 use crate::tools::{self, ExtractError, Result};
 
 pub fn text_of(path: &Path) -> Result<String> {
     match rules::extension(path).as_str() {
-        "docx" => Ok(xml_text(&unzipped("word/document.xml", path)?, "w:p", "w:tab", "w:br", None)),
-        "odt" => Ok(xml_text(&unzipped("content.xml", path)?, "text:p|text:h", "text:tab", "text:line-break", Some("text:s"))),
+        "docx" => office::text(Archive::open(path)?.member("word/document.xml")?, "w:p", "w:tab", "w:br", None, false),
+        "odt" => office::text(Archive::open(path)?.member("content.xml")?, "text:p|text:h", "text:tab", "text:line-break", Some("text:s"), false),
         "rtf" => Ok(rtf(&std::fs::read(path).map_err(|e| ExtractError::Unreadable(e.to_string()))?)),
         "pptx" => slides(path),
         "xlsx" => spreadsheet(path),
@@ -33,8 +36,8 @@ pub fn read_text(path: &Path) -> Result<String> {
     }
     let utf16 = |rest: &[u8], little: bool| {
         let units: Vec<u16> = rest
-            .chunks_exact(2)
-            .map(|pair| if little { u16::from_le_bytes([pair[0], pair[1]]) } else { u16::from_be_bytes([pair[0], pair[1]]) })
+            .as_chunks::<2>().0.iter()
+            .map(|pair| if little { u16::from_le_bytes(*pair) } else { u16::from_be_bytes(*pair) })
             .collect();
         String::from_utf16_lossy(&units)
     };
@@ -64,27 +67,9 @@ fn old_word(path: &Path) -> Result<String> {
     Err(ExtractError::Unreadable("old Word files need catdoc or antiword".into()))
 }
 
-fn unzipped(member: &str, path: &Path) -> Result<String> {
-    let read = tools::run("unzip", &["-p", &path.to_string_lossy(), member])?;
-    if !read.ok() || read.stdout.is_empty() {
-        return Err(ExtractError::Unreadable(format!("not a {} file", rules::extension(path))));
-    }
-    Ok(read.text())
-}
-
-/// A zipped document's members, as (name, bytes once unzipped).
+/// A zipped document's members, read from its central directory without extracting them.
 pub fn zip_members(path: &Path) -> Result<Vec<(String, u64)>> {
-    static LINE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*(\d+)\s+\S+\s+\S+\s+(.+)$").unwrap());
-    let read = tools::run("unzip", &["-l", &path.to_string_lossy()])?;
-    if !read.ok() {
-        return Err(ExtractError::Unreadable(format!("not a {} file", rules::extension(path))));
-    }
-    Ok(read
-        .text()
-        .lines()
-        .filter_map(|line| LINE.captures(line))
-        .filter_map(|found| Some((found[2].trim_end().to_string(), found[1].parse().ok()?)))
-        .collect())
+    Archive::open(path)?.members()
 }
 
 /// About how many characters of text a zipped document holds, from the size of the XML that has its words (the rest is
@@ -102,8 +87,8 @@ pub fn zipped_text_size(path: &Path) -> Option<u64> {
 }
 
 fn attribute(tag: &str, name: &str) -> Option<String> {
-    let pattern = Regex::new(&format!(r#"\s{}="([^"]*)""#, regex::escape(name))).unwrap();
-    pattern.captures(tag).map(|found| unescape(&found[1]))
+    static ATTRIBUTE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"\s([^\s=]+)="([^"]*)""#).unwrap());
+    ATTRIBUTE.captures_iter(tag).find(|found| &found[1] == name).map(|found| unescape(&found[2]))
 }
 
 fn unescape(text: &str) -> String {
@@ -115,11 +100,11 @@ fn unescape(text: &str) -> String {
 }
 
 /// A part's relationships (`_rels/<part>.rels`): id → the member it points at.
-fn relationships(path: &Path, part: &str) -> std::collections::HashMap<String, (String, String)> {
+fn relationships(archive: &mut Archive, part: &str) -> std::collections::HashMap<String, (String, String)> {
     static TAG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<Relationship\b[^>]*>").unwrap());
     let (folder, name) = part.rsplit_once('/').unwrap_or(("", part));
     let rels = if folder.is_empty() { format!("_rels/{name}.rels") } else { format!("{folder}/_rels/{name}.rels") };
-    let Ok(xml) = unzipped(&rels, path) else { return Default::default() };
+    let Ok(xml) = archive.xml(&rels) else { return Default::default() };
     TAG.find_iter(&xml)
         .filter_map(|tag| {
             let tag = tag.as_str();
@@ -163,28 +148,28 @@ fn numbered(members: &[(String, u64)], prefix: &str) -> Vec<String> {
 /// then "Notes: …".
 fn slides(path: &Path) -> Result<String> {
     static SLIDE_ID: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<p:sldId\b[^>]*>").unwrap());
-    static FIELDS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)<a:fld\b.*?</a:fld>").unwrap());
-    let presentation = unzipped("ppt/presentation.xml", path)?;
-    let rels = relationships(path, "ppt/presentation.xml");
+    let mut archive = Archive::open(path)?;
+    let presentation = archive.xml("ppt/presentation.xml")?;
+    let rels = relationships(&mut archive, "ppt/presentation.xml");
     let mut order: Vec<String> = SLIDE_ID
         .find_iter(&presentation)
         .filter_map(|tag| attribute(tag.as_str(), "r:id"))
         .filter_map(|id| rels.get(&id).map(|(member, _)| member.clone()))
         .collect();
     if order.is_empty() {
-        order = numbered(&zip_members(path)?, "ppt/slides/slide");
+        order = numbered(&archive.members()?, "ppt/slides/slide");
     }
     let mut out = String::new();
     for (index, member) in order.iter().enumerate() {
-        let Ok(xml) = unzipped(member, path) else { continue };
-        let text = xml_text(&xml, "a:p", "a:tab", "a:br", None);
+        let Ok(input) = archive.member(member) else { continue };
+        let text = office::text(input, "a:p", "a:tab", "a:br", None, false)?;
         // The notes, without the slide number field their page carries.
-        let notes = relationships(path, member)
-            .into_values()
-            .find(|(_, kind)| kind.ends_with("/notesSlide"))
-            .and_then(|(notes, _)| unzipped(&notes, path).ok())
-            .map(|xml| xml_text(&FIELDS.replace_all(&xml, ""), "a:p", "a:tab", "a:br", None))
-            .unwrap_or_default();
+        let notes_member = relationships(&mut archive, member).into_values()
+            .find(|(_, kind)| kind.ends_with("/notesSlide"));
+        let notes = match notes_member.and_then(|(notes, _)| archive.member(&notes).ok()) {
+            Some(input) => office::text(input, "a:p", "a:tab", "a:br", None, true)?,
+            None => String::new(),
+        };
         if text.is_empty() && notes.is_empty() {
             continue;
         }
@@ -196,6 +181,9 @@ fn slides(path: &Path) -> Result<String> {
             out += &format!("Notes: {notes}\n");
         }
         out.push('\n');
+        if out.len() > office::MAX_TEXT {
+            return Err(ExtractError::Unreadable("Office slide text exceeds 64 MiB".into()));
+        }
     }
     Ok(out.trim_end().to_string())
 }
@@ -210,13 +198,13 @@ const MAX_SHEET_TEXT: usize = 8_000_000;
 /// written as dates.
 fn spreadsheet(path: &Path) -> Result<String> {
     static SHEET: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<sheet\b[^>]*>").unwrap());
-    static ROW: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)<row\b[^>]*>(.*?)</row>").unwrap());
     static CELL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)<c\b([^>]*?)(?:/>|>(.*?)</c>)").unwrap());
     static VALUE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)<v>(.*?)</v>").unwrap());
-    let workbook = unzipped("xl/workbook.xml", path)?;
-    let rels = relationships(path, "xl/workbook.xml");
-    let shared = shared_strings(path);
-    let dates = date_styles(path);
+    let mut archive = Archive::open(path)?;
+    let workbook = archive.xml("xl/workbook.xml")?;
+    let rels = relationships(&mut archive, "xl/workbook.xml");
+    let shared = shared_strings(&mut archive)?;
+    let dates = date_styles(&mut archive);
     let mut out = String::new();
     for tag in SHEET.find_iter(&workbook) {
         let tag = tag.as_str();
@@ -224,11 +212,14 @@ fn spreadsheet(path: &Path) -> Result<String> {
             continue;
         }
         let Some((member, _)) = attribute(tag, "r:id").and_then(|id| rels.get(&id).cloned()) else { continue };
-        let Ok(xml) = unzipped(&member, path) else { continue };
-        let mut rows: Vec<Vec<(usize, String)>> = Vec::new();
-        for row in ROW.captures_iter(&xml) {
+        let Ok(input) = archive.member(&member) else { continue };
+        let mut failure = None;
+        let rows = Elements::new(input, b"row").map_while(|xml| match xml {
+            Ok(xml) => Some(xml),
+            Err(error) => { failure = Some(error); None }
+        }).filter_map(|row| {
             let mut cells = Vec::new();
-            for (position, cell) in CELL.captures_iter(&row[1]).enumerate() {
+            for (position, cell) in CELL.captures_iter(&row).enumerate() {
                 let attributes = &cell[1];
                 let body = cell.get(2).map_or("", |body| body.as_str());
                 let column = attribute(attributes, "r").and_then(|place| column_of(&place)).unwrap_or(position);
@@ -253,41 +244,42 @@ fn spreadsheet(path: &Path) -> Result<String> {
                     }
                 }
             }
-            if !cells.is_empty() {
-                rows.push(cells);
-            }
-        }
-        if rows.is_empty() {
-            continue;
-        }
+            (!cells.is_empty()).then_some(cells)
+        });
         let name = attribute(tag, "name").unwrap_or_default();
-        out += &format!("Sheet: {name}\n");
-        // Headers: a first row of words, not numbers.
-        let first = &rows[0];
-        let wordy = first.iter().filter(|(_, value)| value.parse::<f64>().is_err()).count();
-        let headers: std::collections::HashMap<usize, String> =
-            if rows.len() > 1 && wordy * 2 > first.len() { first.iter().cloned().collect() } else { Default::default() };
-        let start = if headers.is_empty() { 0 } else { 1 };
-        if !headers.is_empty() {
-            out += &format!("Columns: {}\n", first.iter().map(|(_, value)| value.as_str()).collect::<Vec<_>>().join(" · "));
-        }
-        for row in &rows[start..] {
-            let line: Vec<String> = row
-                .iter()
-                .map(|(column, value)| match headers.get(column) {
-                    Some(header) => format!("{header}: {value}"),
-                    None => value.clone(),
-                })
-                .collect();
-            out += &line.join(" · ");
-            out.push('\n');
-            if out.len() > MAX_SHEET_TEXT {
-                return Ok(out);
-            }
-        }
-        out.push('\n');
+        let capped = render_sheet(&mut out, &name, rows, MAX_SHEET_TEXT);
+        if let Some(error) = failure { return Err(error); }
+        if capped { return Ok(out); }
     }
     Ok(out.trim_end().to_string())
+}
+
+/// Writes a sheet's rows (under its header row, when the first row is words and another follows); stops pulling rows
+/// once `out` passes `cap`, returning whether it did.
+fn render_sheet(out: &mut String, name: &str, rows: impl Iterator<Item = Vec<(usize, String)>>, cap: usize) -> bool {
+    let mut rows = rows.peekable();
+    let Some(first) = rows.next() else { return false };
+    *out += &format!("Sheet: {name}\n");
+    let wordy = first.iter().filter(|(_, value)| value.parse::<f64>().is_err()).count();
+    let headers: std::collections::HashMap<usize, String> =
+        if wordy * 2 > first.len() && rows.peek().is_some() { first.iter().cloned().collect() } else { Default::default() };
+    if !headers.is_empty() {
+        *out += &format!("Columns: {}\n", first.iter().map(|(_, value)| value.as_str()).collect::<Vec<_>>().join(" · "));
+    }
+    let first = headers.is_empty().then_some(first);
+    for row in first.into_iter().chain(rows) {
+        let line: Vec<String> = row.iter().map(|(column, value)| match headers.get(column) {
+            Some(header) => format!("{header}: {value}"),
+            None => value.clone(),
+        }).collect();
+        *out += &line.join(" · ");
+        out.push('\n');
+        if out.len() > cap {
+            return true;
+        }
+    }
+    out.push('\n');
+    false
 }
 
 /// The text of a cell's or a shared string's runs (`<t>`), without the phonetic guides some languages add.
@@ -298,20 +290,29 @@ fn run_text(xml: &str) -> String {
     unescape(&TEXT.captures_iter(&xml).map(|found| found[1].to_string()).collect::<String>())
 }
 
-fn shared_strings(path: &Path) -> Vec<String> {
-    static ITEM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)<si\b[^>]*>(.*?)</si>|<si\s*/>").unwrap());
-    let Ok(xml) = unzipped("xl/sharedStrings.xml", path) else { return Vec::new() };
-    ITEM.captures_iter(&xml).map(|item| item.get(1).map_or(String::new(), |body| run_text(body.as_str()))).collect()
+fn shared_strings(archive: &mut Archive) -> Result<Vec<String>> {
+    let Ok(input) = archive.member("xl/sharedStrings.xml") else { return Ok(Vec::new()) };
+    let mut strings = Vec::new();
+    let mut bytes = 0;
+    for xml in Elements::new(input, b"si") {
+        let text = run_text(&xml?);
+        bytes += text.len();
+        if bytes > 16 * 1024 * 1024 || strings.len() >= 250_000 {
+            return Err(ExtractError::Unreadable("Office shared strings exceed 16 MiB or 250000 entries".into()));
+        }
+        strings.push(text);
+    }
+    Ok(strings)
 }
 
 /// The cell styles (by index) that show a number as a date: Excel's own date formats (14–22, 45–47) and custom ones
 /// with a day or a year in them.
-fn date_styles(path: &Path) -> HashSet<usize> {
+fn date_styles(archive: &mut Archive) -> HashSet<usize> {
     static FORMAT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<numFmt\b[^>]*>").unwrap());
     static STYLES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)<cellXfs\b[^>]*>(.*?)</cellXfs>").unwrap());
     static STYLE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<xf\b[^>]*>").unwrap());
     static QUOTED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#""[^"]*"|\[[^\]]*\]|\\."#).unwrap());
-    let Ok(xml) = unzipped("xl/styles.xml", path) else { return HashSet::new() };
+    let Ok(xml) = archive.xml("xl/styles.xml") else { return HashSet::new() };
     let mut formats: HashSet<u32> = (14..=22).chain(45..=47).collect();
     for tag in FORMAT.find_iter(&xml) {
         let (Some(id), Some(code)) = (attribute(tag.as_str(), "numFmtId"), attribute(tag.as_str(), "formatCode")) else {
@@ -438,39 +439,49 @@ static CHUNK_GAPS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n\s*\n\s*\n+
 /// Splits text into ~`size`-character pieces (~450 tokens) that overlap a little, breaking at whitespace. Characters
 /// are counted as people see them (a Bengali letter with its vowel sign is one).
 pub fn chunks(text: &str, size: usize, overlap: usize, limit: usize) -> Vec<String> {
+    if size == 0 || limit == 0 {
+        return Vec::new();
+    }
     let clean = CHUNK_BLANKS.replace_all(text, " ");
     let clean = CHUNK_GAPS.replace_all(&clean, "\n\n");
-    let clean = clean.trim();
-    let graphemes: Vec<&str> = clean.graphemes(true).collect();
-    let is_space = |index: usize| graphemes[index].chars().all(char::is_whitespace);
+    chunk_graphemes(clean.trim().graphemes(true), size, overlap, limit)
+}
+
+/// Keep one chunk and a lookahead grapheme instead of an index of the whole document.
+fn chunk_graphemes<'a>(mut graphemes: impl Iterator<Item = &'a str>, size: usize, overlap: usize, limit: usize) -> Vec<String> {
+    let mut window = Vec::new();
     let mut out = Vec::new();
-    let mut start = 0;
-    while start < graphemes.len() && out.len() < limit {
-        let mut end = (start + size).min(graphemes.len());
-        if end < graphemes.len() {
-            if let Some(space) = (start..end).rev().find(|&index| is_space(index)) {
-                if space - start > size / 2 {
+    while out.len() < limit {
+        window.extend(graphemes.by_ref().take(size.saturating_add(1).saturating_sub(window.len())));
+        if window.is_empty() {
+            break;
+        }
+        let is_space = |index: usize| window[index].chars().all(char::is_whitespace);
+        let mut end = size.min(window.len());
+        if end < window.len() {
+            if let Some(space) = (0..end).rev().find(|&index| is_space(index)) {
+                if space > size / 2 {
                     end = space;
                 }
             }
         }
-        let chunk = graphemes[start..end].concat();
+        let chunk = window[..end].concat();
         let chunk = chunk.trim();
         if !chunk.is_empty() {
             out.push(chunk.to_string());
         }
-        if end >= graphemes.len() {
+        if end >= window.len() {
             break;
         }
-        let mut next = if end >= start + overlap { end - overlap } else { end };
-        if next <= start {
+        let mut next = if end >= overlap { end - overlap } else { end };
+        if next == 0 {
             next = end;
         }
         // Start the next chunk on a word boundary.
         while next < end && !is_space(next) {
             next += 1;
         }
-        start = if next < end { next } else { end };
+        window.drain(..next);
     }
     out
 }
@@ -666,6 +677,140 @@ fn windows_1252(byte: u8) -> char {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "manual performance comparison; run with --ignored --nocapture"]
+    fn bounded_chunk_timings() {
+        let text = "word ".repeat(200_000);
+        let run = |f: fn(&str, usize, usize, usize) -> Vec<String>, limit| {
+            let start = std::time::Instant::now();
+            for _ in 0..10 {
+                std::hint::black_box(f(std::hint::black_box(&text), 1800, 200, limit));
+            }
+            start.elapsed()
+        };
+        let previous = run(reference_chunks, 8);
+        let bounded = run(chunks, 8);
+        eprintln!("one million ASCII graphemes, 8 chunks, 10 iterations: previous={previous:?}, bounded={bounded:?}");
+        let previous = run(reference_chunks, 1000);
+        let bounded = run(chunks, 1000);
+        eprintln!("one million ASCII graphemes, all chunks, 10 iterations: previous={previous:?}, bounded={bounded:?}");
+    }
+
+    #[test]
+    fn sliding_chunks_match_the_previous_algorithm() {
+        for text in ["", "one", "one two three four five six seven", "  a   b\n\n\n c  ",
+                     "বাংলা ভাষা লেখা একটি পরীক্ষা", "cafe\u{301} 😀 family 👨‍👩‍👧‍👦 hello", "verylongwordwithoutanyspaces"] {
+            for size in [1, 2, 5, 12, 30] {
+                for overlap in [0, 1, 3, 20] {
+                    for limit in [0, 1, 2, 6] {
+                        assert_eq!(chunks(text, size, overlap, limit), reference_chunks(text, size, overlap, limit),
+                                   "text={text:?}, size={size}, overlap={overlap}, limit={limit}");
+                    }
+                }
+            }
+        }
+    }
+
+    fn reference_chunks(text: &str, size: usize, overlap: usize, limit: usize) -> Vec<String> {
+        let clean = CHUNK_BLANKS.replace_all(text, " ");
+        let clean = CHUNK_GAPS.replace_all(&clean, "\n\n");
+        let clean = clean.trim();
+        let graphemes: Vec<&str> = clean.graphemes(true).collect();
+        let is_space = |index: usize| graphemes[index].chars().all(char::is_whitespace);
+        let mut out = Vec::new();
+        let mut start = 0;
+        while start < graphemes.len() && out.len() < limit {
+            let mut end = (start + size).min(graphemes.len());
+            if end < graphemes.len() {
+                if let Some(space) = (start..end).rev().find(|&index| is_space(index)) {
+                    if space - start > size / 2 {
+                        end = space;
+                    }
+                }
+            }
+            let chunk = graphemes[start..end].concat();
+            let chunk = chunk.trim();
+            if !chunk.is_empty() {
+                out.push(chunk.to_string());
+            }
+            if end >= graphemes.len() {
+                break;
+            }
+            let mut next = if end >= start + overlap { end - overlap } else { end };
+            if next <= start {
+                next = end;
+            }
+            // Start the next chunk on a word boundary.
+            while next < end && !is_space(next) {
+                next += 1;
+            }
+            start = if next < end { next } else { end };
+        }
+        out
+    }
+
+    #[test]
+    fn chunk_limit_bounds_grapheme_consumption() {
+        let consumed = std::cell::Cell::new(0);
+        let graphemes = std::iter::repeat_n("x", 1_000_000).inspect(|_| consumed.set(consumed.get() + 1));
+        assert_eq!(chunk_graphemes(graphemes, 10, 2, 2), ["xxxxxxxxxx", "xxxxxxxxxx"]);
+        assert_eq!(consumed.get(), 21);
+        assert!(chunks("text", 0, 0, 10).is_empty());
+        assert!(chunks("text", 10, 0, 0).is_empty());
+    }
+
+    #[test]
+    fn utf16_decoding_keeps_byte_order_and_ignores_an_incomplete_unit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("utf16.txt");
+        for little in [true, false] {
+            let mut bytes = if little { vec![0xFF, 0xFE] } else { vec![0xFE, 0xFF] };
+            for unit in "Hello বাংলা 😀".encode_utf16() {
+                bytes.extend(if little { unit.to_le_bytes() } else { unit.to_be_bytes() });
+            }
+            bytes.push(0xAA);
+            std::fs::write(&path, bytes).unwrap();
+            assert_eq!(read_text(&path).unwrap(), "Hello বাংলা 😀");
+        }
+    }
+
+    #[test]
+    fn attributes_match_exact_names_and_decode_entities() {
+        let tag = r#"<c other:r="wrong" r="B12" t="inlineStr" name="A &amp; B"/>"#;
+        assert_eq!(attribute(tag, "r").as_deref(), Some("B12"));
+        assert_eq!(attribute(tag, "name").as_deref(), Some("A & B"));
+        assert_eq!(attribute(tag, "missing"), None);
+        assert_eq!(attribute("<c\tr=\"C1\"/>", "r").as_deref(), Some("C1"));
+    }
+
+    #[test]
+    fn sheet_headers_require_a_second_nonempty_row() {
+        let row = vec![(0, "Name".to_string()), (2, "Count".to_string())];
+        let mut out = String::new();
+        assert!(!render_sheet(&mut out, "One", std::iter::once(row.clone()), 1000));
+        assert_eq!(out, "Sheet: One\nName · Count\n\n");
+        out.clear();
+        let data = vec![(0, "Apples".to_string()), (2, "3".to_string()), (3, "extra".to_string())];
+        assert!(!render_sheet(&mut out, "Two", [row, data].into_iter(), 1000));
+        assert_eq!(out, "Sheet: Two\nColumns: Name · Count\nName: Apples · Count: 3 · extra\n\n");
+        out.clear();
+        assert!(!render_sheet(&mut out, "Empty", std::iter::empty(), 1000));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn sheet_cap_stops_consuming_rows() {
+        let consumed = std::cell::Cell::new(0);
+        let rows = (0..1_000_000).map(|_| {
+            consumed.set(consumed.get() + 1);
+            vec![(0, "1234567890".to_string())]
+        });
+        let mut out = String::new();
+        assert!(render_sheet(&mut out, "Numbers", rows, 40));
+        assert_eq!(consumed.get(), 3);
+        assert_eq!(out, "Sheet: Numbers\n1234567890\n1234567890\n1234567890\n");
+    }
 
     #[test]
     fn rtf_keeps_the_body_and_drops_tables() {

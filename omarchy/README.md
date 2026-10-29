@@ -15,6 +15,8 @@ recall ocr # report system OCR languages
 
 Keep the checkout in a permanent location: launchers and the service refer to it. Source and release installation use the same Rust `setup` command. The installer preserves existing settings, indexes and models. Models download once from a pinned revision and are SHA-256 verified before use; cached copies are verified too. `RECALL_OFFLINE=1` disables automatic downloads for offline operation.
 
+Office documents (DOCX, ODT, PPTX and XLSX) are read internally; `zip` and `unzip` are not needed. Extraction rejects XML metadata over 8 MiB, XML parts requiring more than 64 MiB of scanning, rows or shared strings over 1 MiB, and shared-string tables over 16 MiB or 250,000 entries. Worksheets retain the existing 8-million-byte text cap. These limits keep a large compressed workbook from exhausting memory.
+
 ## Desktop and agents
 
 Super+Ctrl+Shift+F opens the native panel. Arrow keys select; Enter opens at the matching page, source line or media interval; Ctrl+Enter reveals the file. Settings edits selected folders, exclusions, code editor, battery policy and encoder idle timeout. Configuration changes automatically restart affected workers and refresh watches. Only selected folders are indexed.

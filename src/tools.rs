@@ -1,4 +1,4 @@
-//! Running the system's tools that read files: vips or ffmpeg for pictures, poppler for PDFs, unzip for docx and odt,
+//! Running the system's tools that read files: vips or ffmpeg for pictures, poppler for PDFs,
 //! catdoc or antiword for old .doc files, ffmpeg for sound and video.
 
 use std::env;
