@@ -20,10 +20,10 @@ pub fn floats(halves: &[f16], out: &mut [f32]) {
 
 /// `scores[r] = matrix[r] · vector` for rows of `DIMENSION` floats.
 pub fn multiply(matrix: &[f32], vector: &[f32], scores: &mut [f32]) {
-    for (row, score) in matrix.chunks_exact(DIMENSION).zip(scores.iter_mut()) {
+    for (row, score) in matrix.as_chunks::<DIMENSION>().0.iter().zip(scores.iter_mut()) {
         // Eight sums side by side: the compiler turns this into SIMD.
         let mut sums = [0f32; 8];
-        for (a, b) in row.chunks_exact(8).zip(vector.chunks_exact(8)) {
+        for (a, b) in row.as_chunks::<8>().0.iter().zip(vector.as_chunks::<8>().0.iter()) {
             for lane in 0..8 {
                 sums[lane] += a[lane] * b[lane];
             }
@@ -79,8 +79,8 @@ mod tests {
             if row == rows - 5 {
                 target = vector.clone();
             }
-            for pair in half(&vector).chunks_exact(2) {
-                storage.halves.push(f16::from_le_bytes([pair[0], pair[1]]));
+            for pair in half(&vector).as_chunks::<2>().0.iter() {
+                storage.halves.push(f16::from_le_bytes(*pair));
             }
         }
         let scores = storage.score(&target);

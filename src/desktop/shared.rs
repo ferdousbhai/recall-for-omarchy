@@ -232,8 +232,8 @@ impl Owner {
                 params![collection, id, source, digest], |r| r.get(0)).optional()?;
             let vector = match cached {
                 Some(bytes) => bytes
-                    .chunks_exact(4)
-                    .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                    .as_chunks::<4>().0.iter()
+                    .map(|b| f32::from_le_bytes(*b))
                     .collect::<Vec<_>>(),
                 None => {
                     let worker = self.worker(config, kind != "text")?;

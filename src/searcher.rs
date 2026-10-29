@@ -132,11 +132,11 @@ impl Searcher {
         )?;
         let mut cursor = statement.query([])?;
         while let Some(row) = cursor.next()? {
-            let blob: Vec<u8> = row.get(3)?;
+            let blob = row.get_ref(3)?.as_blob()?;
             if blob.len() != DIMENSION * 2 || self.row_file.len() >= rows {
                 continue;
             }
-            matrix.halves.extend(blob.chunks_exact(2).map(|pair| f16::from_le_bytes([pair[0], pair[1]])));
+            matrix.halves.extend(blob.as_chunks::<2>().0.iter().map(|pair| f16::from_le_bytes(*pair)));
             self.row_segment.push(row.get(0)?);
             self.row_file.push(row.get(1)?);
             self.row_modality.push(Modality::parse(&row.get::<_, Option<String>>(2)?.unwrap_or_default()));

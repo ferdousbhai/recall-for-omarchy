@@ -188,7 +188,7 @@ impl EmbeddingWorker {
         };
         let dim = reply.dim.unwrap_or(DIMENSION);
         let floats: Vec<f32> =
-            data.chunks_exact(4).map(|bytes| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])).collect();
+            data.as_chunks::<4>().0.iter().map(|bytes| f32::from_le_bytes(*bytes)).collect();
         if floats.len() != dim * inputs.len() {
             return Err(WorkerError::Failed(format!("got {} floats", floats.len())));
         }

@@ -200,7 +200,7 @@ pub fn audio_windows(path: &Path, window: f64, hop: f64, folder: &Path) -> Resul
         if bytes.len() % 2 == 1 {
             odd = bytes.pop();
         }
-        let samples: Vec<i16> = bytes.chunks_exact(2).map(|pair| i16::from_le_bytes([pair[0], pair[1]])).collect();
+        let samples: Vec<i16> = bytes.as_chunks::<2>().0.iter().map(|pair| i16::from_le_bytes(*pair)).collect();
         if let Err(error) = windows.append(&samples) {
             let _ = child.kill();
             return Err(failed(error));
@@ -261,15 +261,15 @@ pub fn keyframes(path: &Path, interval: f64, max_pixel: u32, max_frames: usize, 
     let mut frames: Vec<Piece> = Vec::new();
     let mut last = None;
     let mut last_color: Option<[i32; 3]> = None;
-    for (index, pixels) in made.stdout.chunks_exact(192).enumerate() {
+    for (index, pixels) in made.stdout.as_chunks::<192>().0.iter().enumerate() {
         let frame = folder.join(format!("{prefix}-{:06}.jpg", index + 1));
         if !frame.exists() {
             break;
         }
-        let gray: Vec<u8> = pixels.chunks_exact(3).map(|rgb|
+        let gray: Vec<u8> = pixels.as_chunks::<3>().0.iter().map(|rgb|
             ((rgb[0] as u32 * 299 + rgb[1] as u32 * 587 + rgb[2] as u32 * 114) / 1000) as u8).collect();
         let color: [i32; 3] = std::array::from_fn(|channel|
-            pixels.chunks_exact(3).map(|rgb| rgb[channel] as i32).sum::<i32>() / 64);
+            pixels.as_chunks::<3>().0.iter().map(|rgb| rgb[channel] as i32).sum::<i32>() / 64);
         let hash = average_hash(&gray);
         let similar_color = last_color.map(|previous|
             (0..3).all(|channel| (color[channel] - previous[channel]).abs() < 16)).unwrap_or(false);
