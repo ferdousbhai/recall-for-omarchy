@@ -51,16 +51,25 @@ for line in sys.stdin:
             fs::Permissions::from_mode(0o755),
         )
         .unwrap();
-        let child = Command::new(dir.path().join("recall"))
-            .arg("daemon")
+        let mut daemon = Command::new(dir.path().join("recall"));
+        daemon.arg("daemon")
             .env("HOME", dir.path())
             .env("XDG_RUNTIME_DIR", dir.path())
             .env("XDG_CONFIG_HOME", dir.path().join("config"))
             .env("RECALL_OFFLINE", "1")
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::null());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let child = loop {
+            // Parallel fork/exec tests can briefly inherit a writer to the copied ELF.
+            match daemon.spawn() {
+                Ok(child) => break child,
+                Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) && Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("Could not launch copied CLI: {error}"),
+            }
+        };
         let fixture = Self { dir, child };
         let deadline = Instant::now() + Duration::from_secs(5);
         while !fixture.dir.path().join("recall-for-omarchy.sock").exists() {
