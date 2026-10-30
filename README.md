@@ -7,28 +7,16 @@ Describe a photo, find a document passage, jump to a recording interval, or sear
 ## Install
 
 ```bash
-curl -fsSL https://ferdousbhai.com/recall/install.sh | bash
+curl -fsSL https://ferdousbhai.com/recall/install.sh | sudo bash
 ```
 
-The installer asks before installing packages (`bash -s -- --yes` or `RECALL_YES=1` skips the prompt). It adds a marked Super+Ctrl+Shift+F block to `~/.config/hypr/bindings.lua` after backing it up, and restores the file if Hyprland reports config errors; set `RECALL_NO_KEYBINDING=1` to skip it. If the GitHub API is rate limited, set `GITHUB_TOKEN` or pin `RECALL_VERSION=v0.4.2`.
+Supports Omarchy (and other Arch Linux) on x86_64 and aarch64. The installer adds Recall's signed pacman repository (the package-signing key is checked against the fingerprint pinned in `install.sh`), installs the `recall-for-omarchy` package with its runtime dependencies, and then runs `recall setup` as you, in your desktop session: the background service, the search panel, the agent skill, and a marked Super+Ctrl+Shift+F block in `~/.config/hypr/bindings.lua` (backed up first, and restored if Hyprland reports config errors; `| sudo RECALL_NO_KEYBINDING=1 bash` skips it). Updates arrive with the rest of the system through `omarchy update`. Re-running the installer is safe.
 
-Release assets from v0.4.3 on are signed with Sigstore (keyless, from this repo's release workflow). To verify a download:
+Installed with an earlier version of this installer? Run the command above once: it replaces the copy in `~/.local/share/recall-for-omarchy` with the package and keeps your settings, index and models.
 
-```bash
-cosign verify-blob recall-for-omarchy-x86_64.tar.gz \
-  --bundle recall-for-omarchy-x86_64.tar.gz.sigstore.json \
-  --certificate-identity-regexp '^https://github.com/ferdousbhai/recall-for-omarchy/.github/workflows/release.yml@refs/tags/v' \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com
-```
+Vulkan GPU acceleration is included on both architectures, with CPU fallback. Apple Silicon on Linux uses Asahi’s Honeykrisp driver; the installer adds `vulkan-asahi` on Apple machines. A first setup selects `~/Documents` and `~/Pictures` (when they exist); change folders in Settings. Embedding model files (about 865 MB: a 310 MB text model and a 555 MB image/audio encoder) download once from Hugging Face at a pinned revision when there are folders to index, and are SHA-256 verified. That download and the install itself are the only network access; search and indexing run offline. Set `RECALL_OFFLINE=1` to disable downloads (for example after copying the files into `~/.local/share/recall/Models` or your Hugging Face cache); `recall status` then reports `download: offline` until they are present. The model is [EmbeddingGemma](https://huggingface.co/ggml-org/embeddinggemma-2-GGUF), licensed under [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0) (see THIRD_PARTY_NOTICES.md). OCR uses Omarchy’s bundled Tesseract and English language data. Initial indexing takes time.
 
-Supports Omarchy on x86_64 and aarch64. The installer downloads a versioned, checksum-verified release, installs runtime dependencies through Omarchy, and configures the desktop integration and agent skill. Vulkan GPU acceleration is included on both architectures, with CPU fallback. Apple Silicon on Linux uses Asahi’s Honeykrisp driver; the installer adds `vulkan-asahi` on Apple machines. Embedding model files (about 865 MB: a 310 MB text model and a 555 MB image/audio encoder) download once from Hugging Face at a pinned revision, after you choose folders to index, and are SHA-256 verified. That download and the install itself are the only network access; search and indexing run offline. Set `RECALL_OFFLINE=1` to disable downloads (for example after copying the files into `~/.local/share/recall/Models` or your Hugging Face cache); `recall status` then reports `download: offline` until they are present. The model is [EmbeddingGemma](https://huggingface.co/ggml-org/embeddinggemma-2-GGUF), licensed under [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0) (see THIRD_PARTY_NOTICES.md). OCR uses Omarchy’s bundled Tesseract and English language data. Initial indexing takes time.
-
-[Omarchy package PR #1066](https://github.com/omacom/omarchy-pkgs/pull/1066) awaits upstream build approval and publication. Once published in your configured channel:
-
-```bash
-omarchy pkg add recall-for-omarchy
-recall setup
-```
+The package installs for every user; `recall setup` is per user. Another user on the same machine runs `recall setup` once.
 
 OCR works through the system `tesseract` executable, without Python or a separate environment. `recall ocr` reports installed recognition languages; additional Tesseract language packs are picked up when indexing workers restart. Images still support visual semantic search when OCR is unavailable.
 
@@ -56,10 +44,11 @@ The CLI and background coordinator are native Rust. The search panel and setting
 export PATH="$HOME/.cargo/bin:$PATH"
 scripts/build-llama.sh
 cargo build --release --locked
-cargo test --release --locked
-cargo clippy --all-targets -- -D warnings
-omarchy/bundle.sh
+bin/check                         # tests, clippy, scripts and the installer test
+bin/build-packages "$(uname -m)"  # the native Arch package into dist/<arch>; no Docker
 ```
+
+`bin/release <version>` publishes a release: write `packaging/release-notes.md` for it first. It bumps the version, runs `bin/check`, tags, builds both architectures in CI, signs the packages and repository locally, and publishes them with `install.sh`; CI then installs the published release in a fresh Arch root.
 
 ## Credits and license
 

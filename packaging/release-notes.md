@@ -1,12 +1,8 @@
-Recall for Omarchy v0.5.0 shares one local embedding service across desktop apps and reads Office documents without external tools.
+Recall for Omarchy v0.6.0 installs from a signed pacman repository and updates with the rest of the system.
 
-- Other local apps can rank their own records through Recall's owner-only socket (`records.search`, `records.forget`, `recall rank`, `recall forget`), keeping their native text search as a fallback. Recall alone owns the model cache and the inference worker; its own indexing uses the same worker. See docs/shared-inference.md.
-- DOCX, ODT, PPTX and XLSX are read in-process, so `zip` and `unzip` are no longer needed. ZIP checksums are verified, and extraction bounds metadata, XML scanning, worksheet rows and shared strings so a large compressed workbook cannot exhaust memory.
-- Long documents are chunked without holding an index of the whole text.
-- The app is shown as "Recall", with refined search and settings styling.
-
-Existing indexes, models, and selected folders are preserved. OCR continues to use system Tesseract; CPU fallback and Vulkan acceleration remain available on both architectures.
-
-Install: `curl -fsSL https://ferdousbhai.com/recall/install.sh | bash`
+- Install or move to the package with `curl -fsSL https://ferdousbhai.com/recall/install.sh | sudo bash`. It adds the [recall-for-omarchy] repository (signed with the same key as Ferdous Bhai's other Omarchy apps), installs `recall-for-omarchy` with its dependencies (and `vulkan-asahi` on Apple hardware), then runs `recall setup` for you in your desktop session. `RECALL_NO_KEYBINDING=1` still skips the keybinding: `| sudo RECALL_NO_KEYBINDING=1 bash`.
+- Updates arrive through `omarchy update`. An upgrade restarts the running service, which then refreshes your panel and agent skill.
+- Moving from an earlier tarball install keeps your settings, index and models; setup points the launchers and the service at the package and removes the old copies under `~/.local/share/recall-for-omarchy/releases`.
+- Packages are built natively for x86_64 and aarch64 from the tagged source, with only relative library search paths.
 
 Based on pdstn12/Recall (MIT), inspired by ARahim3/DigUp.

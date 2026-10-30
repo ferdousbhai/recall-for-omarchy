@@ -13,7 +13,9 @@ cargo build --release --locked
 recall ocr # report system OCR languages
 ```
 
-Keep the checkout in a permanent location: launchers and the service refer to it. Source and release installation use the same Rust `setup` command. The installer preserves existing settings, indexes and models. Models download once from a pinned revision and are SHA-256 verified before use; cached copies are verified too. `RECALL_OFFLINE=1` disables automatic downloads for offline operation.
+Keep the checkout in a permanent location: launchers and the service refer to it. The package and a source checkout use the same Rust `setup` command, which points the launchers and the service at whichever installation runs it; running it from the package again switches back. Setup preserves existing settings, indexes and models, and removes the unused copies earlier installers kept in `~/.local/share/recall-for-omarchy/releases`.
+
+The package (`curl -fsSL https://ferdousbhai.com/recall/install.sh | sudo bash`, or `omarchy pkg add recall-for-omarchy` once the repository is added) puts everything under `/usr/lib/recall-for-omarchy`, with `/usr/bin/recall`. `recall setup` is per user. When `omarchy update` upgrades the package it restarts the service for each logged-in user who runs it, and the service then brings that user's panel and skill up to date. Models download once from a pinned revision and are SHA-256 verified before use; cached copies are verified too. `RECALL_OFFLINE=1` disables automatic downloads for offline operation.
 
 Office documents (DOCX, ODT, PPTX and XLSX) are read internally; `zip` and `unzip` are not needed. Extraction rejects XML metadata over 8 MiB, XML parts requiring more than 64 MiB of scanning, rows or shared strings over 1 MiB, and shared-string tables over 16 MiB or 250,000 entries. Worksheets retain the existing 8-million-byte text cap. These limits keep a large compressed workbook from exhausting memory.
 
@@ -62,8 +64,8 @@ omarchy/bundle.sh
 
 Bundles contain both native executables, relocatable inference libraries, QML, the skill, and smoke-test fixtures. Shared-library aliases remain symlinks. Models and personal indexes are excluded. Python and GTK are not required for CLI or desktop operation. OCR uses the installed Tesseract languages (English first), with a 30-second limit per image and bounded output. Failed images do not disable subsequent OCR. Additional language packs require restarting indexing workers.
 
-The installer detects the running shell's configuration path and adapts the local ShellColor compatibility rename. No files under /usr/share/omarchy are modified.
+`recall setup` detects the running shell's configuration path and adapts the local ShellColor compatibility rename. No files under /usr/share/omarchy are modified. Releases ship native Arch packages built by `bin/build-packages`; `omarchy/bundle.sh` still makes a relocatable tarball for testing elsewhere.
 
 ## Remove integration
 
-Disable the user service with `systemctl --user disable --now recall-for-omarchy.service` and the plugin with `omarchy plugin disable ferdous.recall`. Remove the marked Recall block from ~/.config/hypr/bindings.lua, then run `hyprctl reload` and `hyprctl configerrors`. Remove the user launchers, service, desktop entry, plugin, and skill links if no longer needed. Models and indexes remain unless explicitly deleted.
+Disable the user service with `systemctl --user disable --now recall-for-omarchy.service` and the plugin with `omarchy plugin disable ferdous.recall`. Remove the marked Recall block from ~/.config/hypr/bindings.lua, then run `hyprctl reload` and `hyprctl configerrors`. Remove the user launchers, service, desktop entry, plugin, and skill links if no longer needed. Then `sudo pacman -Rns recall-for-omarchy`; to drop the repository too, remove its `Include` line from /etc/pacman.conf, `/etc/pacman.d/recall-for-omarchy*.conf` and `~/.config/omarchy/hooks/pre-refresh-pacman.d/recall-for-omarchy*`. Models and indexes remain unless explicitly deleted.
