@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Build committed source with native Arch tools; never install the built package.
+# Usage: bin/build-packages <x86_64|aarch64> [output-directory]
+set -euo pipefail
+cd "$(dirname "$0")/.."
+source packaging/PKGBUILD
+architecture=${1:?Usage: bin/build-packages <x86_64|aarch64> [output-directory]}
+[[ " ${arch[*]} " == *" $architecture "* ]] || { echo "Unsupported architecture: $architecture" >&2; exit 1; }
+[[ $(uname -m) == "$architecture" ]] || { echo 'Build on a host of the requested architecture.' >&2; exit 1; }
+if (( EUID == 0 )); then
+  [[ ${RECALL_ARCH_ROOT:-} == 1 ]] || { echo 'Run as a regular Arch user.' >&2; exit 1; }
+  # check() runs the test suite, which uses the runtime tools (OCR, ffmpeg, poppler, libvips).
+  pacman -S --noconfirm --needed base-devel "${makedepends[@]}" "${depends[@]}"
+  pacman -Scc --noconfirm
+  exec runuser -u builder -- "$PWD/bin/build-packages" "$@"
+fi
+for tool in makepkg cargo rustc; do
+  command -v "$tool" >/dev/null || { echo "Native Arch build requires $tool on PATH." >&2; exit 1; }
+done
+output=$(realpath -m "${2:-dist/$architecture}")
+mkdir -p "$output"
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+source_commit=$(git -c safe.directory="$PWD" rev-parse HEAD)
+git -c safe.directory="$PWD/.git" clone --quiet --no-hardlinks "$PWD" "$work/source"
+[[ $(git -C "$work/source" rev-parse HEAD) == "$source_commit" ]]
+# Compiler output and the llama.cpp build outlive the temporary clone, so a rebuild compiles only what changed. The
+# checkout's target/ is the usual place; a checkout owned by another user (CI's read-only mount) is still readable,
+# so the cache moves to the builder's home, or beside the output when that home is not writable either.
+cache=$(realpath -m "${RECALL_PACKAGE_CACHE:-$PWD/target/package-cache/$architecture}")
+if ! mkdir -p "$cache" 2>/dev/null; then
+  cache=$(realpath -m "${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/recall-for-omarchy/package-cache/$architecture")
+  if ! mkdir -p "$cache" 2>/dev/null; then
+    cache=$(realpath -m "$output/.compiler-cache")
+    mkdir -p "$cache"
+  fi
+fi
+export CARGO_TARGET_DIR="$cache/cargo" RECALL_VENDOR="$cache/vendor"
+export CARGO_INCREMENTAL=0
+export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-$(nproc)}
+(cd "$work/source/packaging" && PKGDEST="$output" PKGEXT=.pkg.tar.zst makepkg --force --nodeps)
+printf '%s\n' "$source_commit" > "$output/source-commit.txt"

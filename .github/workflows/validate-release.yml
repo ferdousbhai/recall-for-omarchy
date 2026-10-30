@@ -3,9 +3,8 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Release tag to validate
+        description: Release tag to validate (v0.6.0 or later; earlier releases shipped tarballs)
         required: true
-        default: v0.4.2
 permissions:
   contents: read
 jobs:
@@ -19,40 +18,17 @@ jobs:
           - runner: ubuntu-24.04-arm
             arch: aarch64
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y tesseract-ocr tesseract-ocr-eng ffmpeg poppler-utils libvips-tools libvulkan1 mesa-vulkan-drivers
-      - env:
-          GH_TOKEN: ${{ github.token }}
+        with:
+          fetch-depth: 0
+      - name: Install the release, download the models, and run the smoke test on CPU and Vulkan
+        env:
           RELEASE_TAG: ${{ inputs.version }}
-          ARCH: ${{ matrix.arch }}
         run: |
-          mkdir -p released
-          gh release download "$RELEASE_TAG" --pattern "recall-for-omarchy-$ARCH.tar.gz*" --dir released
-          cd released
-          digest=$(awk 'NR==1 {print $1}' "recall-for-omarchy-$ARCH.tar.gz.sha256")
-          printf '%s  %s\n' "$digest" "recall-for-omarchy-$ARCH.tar.gz" | sha256sum --check
-          tar -xzf "recall-for-omarchy-$ARCH.tar.gz"
-      - name: Verify system OCR availability
-        run: released/recall-for-omarchy/target/release/recall ocr
-      - name: Download and verify pinned model files
-        run: |
-          python3 - <<'PY'
-          import hashlib, json, pathlib, subprocess, urllib.request
-          files = json.loads(subprocess.check_output(['released/recall-for-omarchy/target/release/recall', 'models']))
-          folder = pathlib.Path.home() / '.local/share/recall/Models'
-          folder.mkdir(parents=True, exist_ok=True)
-          for file in files:
-              path = folder / file['name']
-              urllib.request.urlretrieve(file['url'], path)
-              assert path.stat().st_size == file['bytes']
-              assert hashlib.sha256(path.read_bytes()).hexdigest() == file['sha256']
-          PY
-      - name: Verify CPU fallback
-        run: RECALL_DEVICE=cpu python3 released/recall-for-omarchy/omarchy/smoke.py
-      - name: Verify packaged Vulkan plugin
-        run: |
-          GGML_VK_VISIBLE_DEVICES=0 RECALL_DEVICE=vulkan released/recall-for-omarchy/target/release/recall-engine devices
-          GGML_VK_VISIBLE_DEVICES=0 RECALL_DEVICE=vulkan python3 released/recall-for-omarchy/omarchy/smoke.py
-        # Hosted runners exercise Vulkan through Mesa software rendering;
-        # Apple M1 Max hardware correctness/performance is checked locally.
+          [[ $RELEASE_TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          git checkout "$RELEASE_TAG" -- install.sh packaging/PKGBUILD Cargo.toml omarchy/smoke.py tests/reference
+          sudo apt-get update
+          sudo apt-get install -y arch-install-scripts zstd
+          bin/validate-models "$RELEASE_TAG"

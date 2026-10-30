@@ -1,0 +1,85 @@
+# Maintainer: Ferdous Bhai <https://github.com/ferdousbhai>
+# Built from the committed source, natively on each architecture (bin/build-packages).
+pkgname=recall-for-omarchy
+_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$_root/Cargo.toml" | head -1)
+_rustflags=${RUSTFLAGS:-}
+pkgver=$_version
+pkgrel=1
+pkgdesc='Local semantic file search for Omarchy, with a CLI and bundled agent skill'
+arch=('x86_64' 'aarch64')
+url='https://github.com/ferdousbhai/recall-for-omarchy'
+license=('MIT')
+# What the service and its workers run: extraction tools, system OCR, the Vulkan loader (CPU fallback without a
+# driver), file opening and the D-Bus/systemd helpers.
+depends=('bash' 'coreutils' 'curl' 'ffmpeg' 'gcc-libs' 'glib2' 'glibc' 'libvips' 'poppler' 'systemd'
+  'tesseract' 'tesseract-data-eng' 'vulkan-icd-loader' 'xdg-terminal-exec' 'xdg-utils')
+optdepends=('omarchy: the search panel, keybinding and `recall setup`'
+  'git: skip ignored files in code folders'
+  'catdoc: legacy Word documents'
+  'antiword: legacy Word documents (when catdoc is missing)'
+  'neovim: open code results at the matching line'
+  'mpv: open media at the matching interval')
+# install.sh adds it on Apple hardware; other ARM machines bring their own Vulkan driver, or use the CPU.
+optdepends_aarch64=('vulkan-asahi: GPU acceleration on Apple Silicon')
+makedepends=('rust' 'cargo' 'git' 'clang' 'cmake' 'ninja' 'vulkan-headers' 'vulkan-icd-loader' 'shaderc' 'spirv-headers')
+options=('!debug' '!lto')
+install=recall-for-omarchy.install
+
+pkgver() {
+  local description
+  if description=$(git -C "$_root" describe --tags --long --match 'v[0-9]*' 2>/dev/null); then
+    sed 's/^v//; s/-\([0-9]*\)-g\([0-9a-f]*\)$/\.r\1.\2/; s/\.r0\.[0-9a-f]*$//' <<< "$description"
+  else
+    printf '%s.r%s.%s\n' "$_version" "$(git -C "$_root" rev-list --count HEAD)" "$(git -C "$_root" rev-parse --short HEAD)"
+  fi
+}
+
+prepare() {
+  rm -rf "$srcdir/recall-for-omarchy"
+  mkdir -p "$srcdir/recall-for-omarchy"
+  git -C "$_root" archive HEAD | tar -x -C "$srcdir/recall-for-omarchy"
+  cd "$srcdir/recall-for-omarchy"
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+_env() {
+  # The compiler the released vectors were checked with; Vulkan is required, not detected.
+  export CC=clang CXX=clang++ RECALL_BUILD_VULKAN=1 RECALL_RELOCATABLE=1
+  # bin/build-packages keeps llama.cpp's build across clean checkouts.
+  export RECALL_VENDOR="${RECALL_VENDOR:-$srcdir/vendor}"
+  export RECALL_LLAMA_DIR="$RECALL_VENDOR/llama"
+  export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$srcdir/recall-for-omarchy/target}"
+  export RUSTFLAGS="$_rustflags --remap-path-prefix=$srcdir/recall-for-omarchy=/build --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
+}
+
+build() {
+  cd "$srcdir/recall-for-omarchy"
+  _env
+  scripts/build-llama.sh
+  cargo build --frozen --release
+}
+
+check() {
+  cd "$srcdir/recall-for-omarchy"
+  _env
+  # The build has only relative library paths (next to the binary, as installed); point the tests at the build.
+  LD_LIBRARY_PATH="$RECALL_LLAMA_DIR/lib" cargo test --frozen --release
+}
+
+package() {
+  cd "$srcdir/recall-for-omarchy"
+  _env
+  # The layout `recall setup` expects: executables and llama.cpp next to each other, the panel two levels up.
+  local lib="$pkgdir/usr/lib/$pkgname"
+  install -Dm755 -t "$lib/target/release" "$CARGO_TARGET_DIR/release/recall" "$CARGO_TARGET_DIR/release/recall-engine"
+  cp -P "$RECALL_LLAMA_DIR"/lib/*.so* "$lib/target/release/"
+  install -dm755 "$lib/omarchy"
+  cp -r omarchy/plugin omarchy/assets omarchy/skills "$lib/omarchy/"
+  install -dm755 "$pkgdir/usr/bin"
+  ln -s "/usr/lib/$pkgname/target/release/recall" "$pkgdir/usr/bin/recall"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 THIRD_PARTY_NOTICES.md "$pkgdir/usr/share/licenses/$pkgname/THIRD_PARTY_NOTICES.md"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 omarchy/README.md "$pkgdir/usr/share/doc/$pkgname/USAGE.md"
+}

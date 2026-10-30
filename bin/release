@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# Release one version: bump, check, tag, build natively in CI on both architectures, sign locally, publish.
+# Usage: bin/release <major.minor.patch>   (write packaging/release-notes.md for that version first)
+set -euo pipefail
+cd "$(dirname "$0")/.."
+command -v cargo >/dev/null || export PATH="$HOME/.cargo/bin:$PATH"
+source packaging/PKGBUILD
+[[ $# == 1 && $1 =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Usage: bin/release <major.minor.patch>' >&2; exit 1; }
+version=$1 tag=v$1
+[[ $(vercmp "$version" "$pkgver") -gt 0 ]] || { echo "Choose a version newer than $pkgver." >&2; exit 1; }
+[[ -z $(git status --porcelain) ]] || { echo 'Commit your changes first.' >&2; exit 1; }
+gh_repo=${url#https://github.com/}
+# This checkout also tracks the upstream fork (origin); releases go to the remote for $gh_repo.
+remote=$(git remote -v | awk -v repo="$gh_repo" '$3 == "(push)" && $2 ~ ("github\\.com[:/]" repo "(\\.git)?$") { print $1; exit }')
+[[ -n $remote ]] || { echo "No git remote points at $gh_repo." >&2; exit 1; }
+git fetch -q "$remote" main --tags
+git merge-base --is-ancestor "$remote/main" HEAD || { echo "HEAD does not contain $remote/main; rebase first." >&2; exit 1; }
+! git rev-parse -q --verify "refs/tags/$tag" >/dev/null || { echo "$tag already exists." >&2; exit 1; }
+grep -qF "$tag" packaging/release-notes.md || { echo "Write packaging/release-notes.md for $tag first." >&2; exit 1; }
+fingerprint=$(sed -n 's/^SIGNING_KEY_FINGERPRINT=//p' install.sh)
+gpg --batch --list-secret-keys "$fingerprint" >/dev/null
+export GPGKEY=$fingerprint
+
+sed -i "0,/^version = .*/s//version = \"$version\"/" Cargo.toml
+sed -i "s/^\(  \"version\": \)\"[^\"]*\"/\1\"$version\"/" omarchy/plugin/manifest.json
+cargo update --workspace --offline
+bin/check
+git commit -q -a -m "Release $tag"
+git tag -a "$tag" -m "Recall for Omarchy $version"
+source_commit=$(git rev-parse HEAD)
+# workflow_dispatch runs only workflows that exist on the default branch, so main gets the release commit first.
+git push -q "$remote" HEAD:main "$tag"
+gh workflow run packages.yml --repo "$gh_repo" --ref "$tag"
+run_id=''
+for attempt in {1..60}; do
+  run_id=$(gh run list --repo "$gh_repo" --workflow packages.yml --event workflow_dispatch \
+    --branch "$tag" --commit "$source_commit" --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+  [[ -z $run_id ]] || break
+  sleep 10
+done
+[[ -n $run_id ]] || { echo "Native CI did not start; the tag remains for inspection." >&2; exit 1; }
+gh run watch "$run_id" --repo "$gh_repo" --exit-status \
+  || { echo "Native CI failed; no release was published. Inspect run $run_id." >&2; exit 1; }
+# Revalidate the completed run, not just its search result or filename.
+run_valid=$(gh run view "$run_id" --repo "$gh_repo" \
+  --json headSha,headBranch,event,status,conclusion \
+  --jq ".headSha == \"$source_commit\" and .headBranch == \"$tag\" and .event == \"workflow_dispatch\" and .status == \"completed\" and .conclusion == \"success\"")
+[[ $run_valid == true ]] || { echo "CI run provenance/status mismatch; not signing." >&2; exit 1; }
+artifacts=$(mktemp -d)
+trap 'rm -rf "$artifacts"' EXIT
+gh run download "$run_id" --repo "$gh_repo" --dir "$artifacts"
+rm -rf dist/release
+bin/collect-packages "$artifacts" "$source_commit" dist/release "$version-$pkgrel"
+for package in dist/release/*.pkg.tar.zst; do
+  gpg --local-user "$fingerprint" --detach-sign --output "$package.sig" "$package"
+  gpg --verify "$package.sig" "$package"
+done
+(
+  cd dist/release
+  for architecture in "${arch[@]}"; do
+    name=$pkgname
+    [[ $architecture == x86_64 ]] || name+=-aarch64
+    repo-add --sign --verify "$name.db.tar.gz" ./*-"$architecture.pkg.tar.zst"
+    for suffix in db files; do
+      rm -f "$name.$suffix" "$name.$suffix.sig"
+      cp "$name.$suffix.tar.gz" "$name.$suffix"
+      cp "$name.$suffix.tar.gz.sig" "$name.$suffix.sig"
+    done
+    gpg --batch --armor --export "$fingerprint" >"$name-signing-key.asc"
+  done
+  cp ../../install.sh install.sh
+)
+
+gh release create "$tag" dist/release/* --repo "$gh_repo" --title "Recall for Omarchy $tag" \
+  --notes-file packaging/release-notes.md --verify-tag --latest
+echo "Published https://github.com/$gh_repo/releases/tag/$tag; installation verification runs in CI."

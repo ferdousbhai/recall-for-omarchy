@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Validate the package for both architectures before copying it for signing.
+# Usage: bin/collect-packages <artifact-root> <source-commit> <output> [<pkgver-pkgrel>]
+set -euo pipefail
+root=${1:?artifact root required} commit=${2:?source commit required} output=${3:?output required}
+[[ $commit =~ ^[0-9a-f]{40}$ ]] || { echo 'Invalid source commit' >&2; exit 1; }
+source "$(dirname "$0")/../packaging/PKGBUILD"
+files=()
+version=${4:-}
+shopt -s nullglob
+for architecture in "${arch[@]}"; do
+  directory=$root/$pkgname-$architecture
+  [[ $(cat "$directory/source-commit.txt") == "$commit" ]] || { echo "Wrong $architecture source commit" >&2; exit 1; }
+  found=("$directory/"*.pkg.tar.zst)
+  (( ${#found[@]} == 1 )) || { echo "Expected exactly one $architecture package" >&2; exit 1; }
+  metadata=$(bsdtar -xOf "${found[0]}" .PKGINFO)
+  grep -qxF "pkgname = $pkgname" <<< "$metadata"
+  grep -qxF "arch = $architecture" <<< "$metadata"
+  actual_version=$(sed -n 's/^pkgver = //p' <<< "$metadata")
+  version=${version:-$actual_version}
+  [[ $actual_version == "$version" ]] || { echo "Versions differ: $actual_version, expected $version" >&2; exit 1; }
+  [[ $(basename "${found[0]}") == "$pkgname-$version-$architecture.pkg.tar.zst" ]]
+  files+=("${found[0]}")
+done
+mkdir -p "$output"
+cp "${files[@]}" "$output/"

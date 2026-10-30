@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Check the published installer bytes and install the release in a fresh native Arch root.
+set -euo pipefail
+[[ $# == 1 && $1 =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Usage: bin/verify-release <vMAJOR.MINOR.PATCH>' >&2; exit 1; }
+tag=$1
+if [[ ${RECALL_ARCH_ROOT:-} != 1 ]]; then
+  exec sudo "$(dirname "$0")/arch-run" bin/verify-release "$tag"
+fi
+cd "$(dirname "$0")/.."
+source packaging/PKGBUILD
+download=$url/releases/download/$tag
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+curl -fsSL "$download/install.sh" -o "$work/install.sh"
+cmp install.sh "$work/install.sh"
+# As root with no desktop user, the installer installs the package and leaves `recall setup` to the user.
+RECALL_RELEASES="$download" bash "$work/install.sh"
+[[ $(pacman -Q "$pkgname") == "$pkgname ${tag#v}-$pkgrel" ]]
+[[ $(recall --version) == "recall ${tag#v}" ]]
+recall skill | cmp - omarchy/skills/recall/SKILL.md
+recall ocr
+recall doctor
+echo "Verified: $pkgname ${tag#v} on $(uname -m)"

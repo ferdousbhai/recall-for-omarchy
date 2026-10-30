@@ -1,0 +1,54 @@
+name: Native packages
+# Started by bin/release on the release tag; changes are checked by bin/check and ci.yml.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  installer-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          bash -n install.sh packaging/PKGBUILD packaging/recall-for-omarchy.install scripts/build-llama.sh \
+            bin/arch-run bin/build-packages bin/collect-packages bin/release bin/verify-release
+          tests/install_test.sh
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Cache Cargo downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            dist/cargo-${{ matrix.arch }}/registry/index
+            dist/cargo-${{ matrix.arch }}/registry/cache
+            dist/cargo-${{ matrix.arch }}/git/db
+          key: cargo-downloads-${{ matrix.arch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-downloads-${{ matrix.arch }}-
+      - name: Install Arch chroot tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y arch-install-scripts zstd
+      - name: Build and test the package
+        run: sudo bin/arch-run bin/build-packages '${{ matrix.arch }}' /output
+      - uses: actions/upload-artifact@v4
+        with:
+          name: recall-for-omarchy-${{ matrix.arch }}
+          path: |
+            dist/${{ matrix.arch }}/*.pkg.tar.zst
+            dist/${{ matrix.arch }}/source-commit.txt
+          if-no-files-found: error

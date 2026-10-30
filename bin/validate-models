@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Install a published release in a fresh native Arch root, download the pinned model files, and run the real-model
+# smoke test on the CPU and on Vulkan (Mesa's software renderer on hosted runners; Apple hardware is checked locally).
+set -euo pipefail
+[[ $# == 1 && $1 =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Usage: bin/validate-models <vMAJOR.MINOR.PATCH>' >&2; exit 1; }
+tag=$1
+if [[ ${RECALL_ARCH_ROOT:-} != 1 ]]; then
+  exec sudo "$(dirname "$0")/arch-run" bin/validate-models "$tag"
+fi
+cd "$(dirname "$0")/.."
+source packaging/PKGBUILD
+RECALL_RELEASES="$url/releases/download/$tag" bash install.sh
+pacman -S --noconfirm --needed python vulkan-swrast
+# smoke.py finds the engine and its fixtures relative to itself, as in a checkout.
+tree=$(mktemp -d)
+trap 'rm -rf "$tree"' EXIT
+ln -s "/usr/lib/$pkgname/target" "$tree/target"
+mkdir "$tree/omarchy"
+cp omarchy/smoke.py "$tree/omarchy/"
+cp -r tests "$tree/"
+recall ocr
+python3 - <<'PY'
+import hashlib, json, pathlib, subprocess, urllib.request
+files = json.loads(subprocess.check_output(['recall', 'models']))
+folder = pathlib.Path.home() / '.local/share/recall/Models'
+folder.mkdir(parents=True, exist_ok=True)
+for file in files:
+    path = folder / file['name']
+    urllib.request.urlretrieve(file['url'], path)
+    assert path.stat().st_size == file['bytes']
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == file['sha256']
+PY
+RECALL_DEVICE=cpu python3 "$tree/omarchy/smoke.py"
+GGML_VK_VISIBLE_DEVICES=0 RECALL_DEVICE=vulkan "/usr/lib/$pkgname/target/release/recall-engine" devices
+GGML_VK_VISIBLE_DEVICES=0 RECALL_DEVICE=vulkan python3 "$tree/omarchy/smoke.py"
+echo "Validated the models on $(uname -m) with $pkgname ${tag#v}"

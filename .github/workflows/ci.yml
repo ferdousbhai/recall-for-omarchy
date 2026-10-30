@@ -31,3 +31,11 @@ jobs:
       - run: cargo test --locked
       - if: matrix.toolchain == '1.89' # newer stable clippy adds lints; pin to keep CI reproducible
         run: cargo clippy --locked --all-targets -- -D warnings
+  installer:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          bash -n install.sh packaging/PKGBUILD packaging/recall-for-omarchy.install scripts/build-llama.sh omarchy/bundle.sh \
+            bin/arch-run bin/build-packages bin/check bin/collect-packages bin/release bin/validate-models bin/verify-release
+          tests/install_test.sh
