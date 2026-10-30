@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "ferdous.recall",
   "name": "Recall",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "author": "Ferdous Bhai",
   "description": "Local semantic search across documents, pictures, recordings and code",
   "kinds": ["panel", "bar-widget"],
