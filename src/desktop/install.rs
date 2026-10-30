@@ -16,8 +16,23 @@ fn backup(path: &Path) -> Result<()> {
     }
     Ok(())
 }
+/// A launcher this command wrote (for any installation: a release, a package or a checkout).
+fn generated_launcher(path: &Path) -> bool {
+    fs::read_to_string(path).is_ok_and(|text| {
+        let mut lines = text.lines();
+        lines.next() == Some("#!/bin/sh")
+            && lines.all(|line| {
+                line.starts_with("exec '")
+                    || line == "exec omarchy-shell \"$@\""
+                    || line.starts_with("export OMARCHY_PATH='")
+            })
+    })
+}
 fn launcher(path: &Path, body: &str) -> Result<()> {
-    backup(path)?;
+    // Rewriting one of our own launchers (moving to a new installation) needs no backup.
+    if !generated_launcher(path) {
+        backup(path)?;
+    }
     atomic_write(path, format!("#!/bin/sh\n{body}\n").as_bytes())?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
     Ok(())
@@ -41,22 +56,8 @@ pub(super) fn skill() -> Result<Value> {
     }
     Ok(json!({"installed":shared.join("SKILL.md"),"links":links}))
 }
-pub(super) fn desktop() -> Result<()> {
-    let root = root()?;
-    let binary = std::env::current_exe()?;
-    if !engine()?.is_file() {
-        bail!("Build the engine before setup");
-    }
-    let home = paths::home();
-    let bin = home.join(".local/bin");
-    fs::create_dir_all(&bin)?;
-    let config = config_path()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    let data = paths::support().parent().unwrap().to_path_buf();
+/// The running Omarchy shell's root (an `omarchy dev link` checkout, say), else $OMARCHY_PATH or /usr/share/omarchy.
+fn shell_root() -> Result<PathBuf> {
     let mut shell = std::env::var_os("OMARCHY_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|| "/usr/share/omarchy".into());
@@ -75,6 +76,83 @@ pub(super) fn desktop() -> Result<()> {
             }
         }
     }
+    Ok(shell)
+}
+fn config_home() -> PathBuf {
+    config_path().parent().unwrap().parent().unwrap().to_path_buf()
+}
+fn plugin_dir() -> PathBuf {
+    config_home().join("omarchy/plugins/ferdous.recall")
+}
+/// Copy this installation's panel into the user's Omarchy plugins; true when a file changed.
+/// The plugin folder belongs to Recall, so files are replaced without backups.
+fn install_plugin(shell: &Path) -> Result<bool> {
+    let plugin = plugin_dir();
+    fs::create_dir_all(&plugin)?;
+    let colors = fs::read_to_string(shell.join("shell/Commons/qmldir"))
+        .unwrap_or_default()
+        .contains("singleton ShellColor");
+    let mut changed = false;
+    for entry in fs::read_dir(root()?.join("omarchy/plugin"))? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let dest = plugin.join(entry.file_name());
+        let mut text = fs::read_to_string(entry.path())?;
+        if colors {
+            text = text.replace("Color.menu", "ShellColor.menu");
+        }
+        if fs::read(&dest).ok().as_deref() != Some(text.as_bytes()) {
+            atomic_write(&dest, text.as_bytes())?;
+            changed = true;
+        }
+    }
+    Ok(changed)
+}
+fn rescan_plugins(shell: &Path) -> Result<()> {
+    checked(
+        Command::new("omarchy-shell")
+            .args(["shell", "rescanPlugins"])
+            .env("OMARCHY_PATH", shell),
+    )
+}
+/// When the service starts, bring what `setup` copied for this user up to this version: the panel and the skill.
+/// A package update replaces the binaries but cannot write into home folders; the restarted service does that.
+/// Nothing is created that setup did not create first.
+pub(super) fn refresh() -> Result<()> {
+    if plugin_dir().join("manifest.json").is_file() {
+        let shell = shell_root()?;
+        if install_plugin(&shell)? {
+            rescan_plugins(&shell)?;
+        }
+    }
+    let skill = paths::home().join(".agents/skills/recall/SKILL.md");
+    if skill.is_file() && fs::read(&skill)? != SKILL.as_bytes() {
+        atomic_write(&skill, SKILL.as_bytes())?;
+    }
+    Ok(())
+}
+fn unit(executable: &str) -> String {
+    format!("[Unit]\nDescription=Recall local semantic search for Omarchy\nPartOf=graphical-session.target\nAfter=graphical-session.target\n\n[Service]\nType=simple\nExecStart=\"{executable}\" daemon\nRestart=on-failure\nRestartSec=5\nNice=10\nUMask=0077\nTimeoutStopSec=15\n\n[Install]\nWantedBy=graphical-session.target\n")
+}
+/// A unit file this command wrote, whichever installation it started.
+fn generated_unit(path: &Path) -> bool {
+    let without_exec = |text: &str| text.lines().filter(|l| !l.starts_with("ExecStart=")).collect::<Vec<_>>().join("\n");
+    fs::read_to_string(path).is_ok_and(|text| without_exec(&text) == without_exec(&unit("")))
+}
+pub(super) fn desktop() -> Result<()> {
+    let root = root()?;
+    let binary = std::env::current_exe()?;
+    if !engine()?.is_file() {
+        bail!("Build the engine before setup");
+    }
+    let home = paths::home();
+    let bin = home.join(".local/bin");
+    fs::create_dir_all(&bin)?;
+    let config = config_home();
+    let data = paths::support().parent().unwrap().to_path_buf();
+    let shell = shell_root()?;
     launcher(
         &bin.join("recall"),
         &format!("exec {} \"$@\"", shell_quote(&binary)),
@@ -98,33 +176,18 @@ pub(super) fn desktop() -> Result<()> {
     if !config_path().exists() {
         save_config(&defaults())?;
     }
-    let plugin = config.join("omarchy/plugins/ferdous.recall");
-    fs::create_dir_all(&plugin)?;
-    let colors = fs::read_to_string(shell.join("shell/Commons/qmldir"))
-        .unwrap_or_default()
-        .contains("singleton ShellColor");
-    for entry in fs::read_dir(root.join("omarchy/plugin"))? {
-        let entry = entry?;
-        if !entry.file_type()?.is_file() {
-            continue;
-        }
-        let dest = plugin.join(entry.file_name());
-        backup(&dest)?;
-        let mut text = fs::read_to_string(entry.path())?;
-        if colors {
-            text = text.replace("Color.menu", "ShellColor.menu");
-        }
-        atomic_write(&dest, text.as_bytes())?;
-    }
+    install_plugin(&shell)?;
     let service = config.join("systemd/user/recall-for-omarchy.service");
-    backup(&service)?;
+    if !generated_unit(&service) {
+        backup(&service)?;
+    }
     // systemd unit quoting is distinct from shell quoting; escape all specifiers and quoted-string characters.
     let executable = binary
         .to_string_lossy()
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('%', "%%");
-    atomic_write(&service,format!("[Unit]\nDescription=Recall local semantic search for Omarchy\nPartOf=graphical-session.target\nAfter=graphical-session.target\n\n[Service]\nType=simple\nExecStart=\"{executable}\" daemon\nRestart=on-failure\nRestartSec=5\nNice=10\nUMask=0077\nTimeoutStopSec=15\n\n[Install]\nWantedBy=graphical-session.target\n").as_bytes())?;
+    atomic_write(&service, unit(&executable).as_bytes())?;
     // Opt out with RECALL_NO_KEYBINDING=1. The block is marked so it can be removed cleanly.
     let bindings = config.join("hypr/bindings.lua");
     let marker = "-- recall-for-omarchy: start";
@@ -172,16 +235,21 @@ pub(super) fn desktop() -> Result<()> {
         "recall-for-omarchy.service",
     ]))?;
     checked(Command::new("systemctl").args(["--user", "restart", "recall-for-omarchy.service"]))?;
-    checked(
-        Command::new("omarchy-shell")
-            .args(["shell", "rescanPlugins"])
-            .env("OMARCHY_PATH", &shell),
-    )?;
+    rescan_plugins(&shell)?;
     checked(
         Command::new("omarchy")
             .args(["plugin", "enable", "ferdous.recall"])
             .env("OMARCHY_PATH", &shell),
     )?;
+    // Releases up to v0.5.0 installed as tarballs under ~/.local/share/recall-for-omarchy/releases. The launchers and
+    // the service now start this installation, so those copies are unused. Settings, index and models are elsewhere.
+    let releases = data.join("recall-for-omarchy/releases");
+    if let Ok(old) = releases.canonicalize() {
+        if !binary.starts_with(&old) {
+            fs::remove_dir_all(&old)?;
+            let _ = fs::remove_dir(releases.parent().unwrap());
+        }
+    }
     println!(
         "{}",
         json!({"installed":true,"shortcut":"Super+Ctrl+Shift+F","settings":"recall settings"})

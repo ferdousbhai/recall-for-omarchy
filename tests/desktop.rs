@@ -425,3 +425,139 @@ fn empty_selections_and_exclusions_hide_retained_hits_and_passages() {
     );
     assert!(fixture.rpc(json!({"op":"text","segment":segment}))["text"].is_null());
 }
+
+/// Copies the CLI and engine into an installation laid out like the package (`<root>/target/release`, `<root>/omarchy`).
+fn installation(at: &std::path::Path) -> std::path::PathBuf {
+    let release = at.join("target/release");
+    fs::create_dir_all(&release).unwrap();
+    fs::copy(CLI, release.join("recall")).unwrap();
+    fs::copy(env!("CARGO_BIN_EXE_recall-engine"), release.join("recall-engine")).unwrap();
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("omarchy");
+    for folder in ["plugin", "assets"] {
+        fs::create_dir_all(at.join("omarchy").join(folder)).unwrap();
+        for entry in fs::read_dir(source.join(folder)).unwrap() {
+            let entry = entry.unwrap();
+            fs::copy(entry.path(), at.join("omarchy").join(folder).join(entry.file_name())).unwrap();
+        }
+    }
+    release.join("recall")
+}
+/// Runs a freshly copied executable, retrying while a parallel fork still holds it open for writing.
+fn spawn_copied(command: &mut Command) -> Child {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match command.spawn() {
+            Ok(child) => return child,
+            Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("Could not launch copied CLI: {error}"),
+        }
+    }
+}
+
+#[test]
+fn setup_takes_over_a_tarball_install_and_keeps_settings_and_index() {
+    let mut fixture = Fixture::new();
+    let home = fixture.dir.path().to_path_buf();
+    // Desktop commands are stubs that record their arguments.
+    let stubs = home.join("stubs");
+    fs::create_dir_all(&stubs).unwrap();
+    let log = home.join("commands.log");
+    for name in ["qs", "systemctl", "hyprctl", "omarchy-shell", "omarchy"] {
+        let path = stubs.join(name);
+        fs::write(&path, format!("#!/bin/sh\necho \"{name} $*\" >> '{}'\n", log.display())).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let shell = home.join("omarchy-shell-root");
+    fs::create_dir_all(&shell).unwrap();
+    // What a v0.4.3 tarball install left behind.
+    let old = home.join("data/recall-for-omarchy/releases/v0.4.3/recall-for-omarchy/target/release");
+    fs::create_dir_all(&old).unwrap();
+    fs::write(old.join("recall"), "old").unwrap();
+    let bin = home.join(".local/bin");
+    fs::create_dir_all(&bin).unwrap();
+    let quoted = |name: &str| format!("'{}'", old.join(name).display());
+    fs::write(bin.join("recall"), format!("#!/bin/sh\nexec {} \"$@\"\n", quoted("recall"))).unwrap();
+    fs::write(bin.join("recall-client"), format!("#!/bin/sh\nexec {} client \"$@\"\n", quoted("recall"))).unwrap();
+    fs::write(bin.join("recall-engine"), format!("#!/bin/sh\nexec {} \"$@\"\n", quoted("recall-engine"))).unwrap();
+    fs::write(bin.join("recall-shell"), "#!/bin/sh\nexport OMARCHY_PATH='/usr/share/omarchy'\nexec omarchy-shell \"$@\"\n").unwrap();
+    fs::write(bin.join("unrelated"), "#!/bin/sh\necho mine\n").unwrap();
+    let units = home.join("config/systemd/user");
+    fs::create_dir_all(&units).unwrap();
+    fs::write(units.join("recall-for-omarchy.service"), format!("[Unit]\nDescription=Recall local semantic search for Omarchy\nPartOf=graphical-session.target\nAfter=graphical-session.target\n\n[Service]\nType=simple\nExecStart=\"{}\" daemon\nRestart=on-failure\nRestartSec=5\nNice=10\nUMask=0077\nTimeoutStopSec=15\n\n[Install]\nWantedBy=graphical-session.target\n", old.join("recall").display())).unwrap();
+    let plugin = home.join("config/omarchy/plugins/ferdous.recall");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(plugin.join("SearchPanel.qml"), "old panel").unwrap();
+    let bindings = home.join("config/hypr/bindings.lua");
+    fs::create_dir_all(bindings.parent().unwrap()).unwrap();
+    let keys = "-- recall-for-omarchy: start\no.bind(\"SUPER + CTRL + SHIFT + F\", \"Recall semantic search\", \"recall toggle\")\n-- recall-for-omarchy: end\n";
+    fs::write(&bindings, keys).unwrap();
+    let settings = home.join("config/recall/settings.json");
+    let before = fs::read(&settings).unwrap();
+    fs::create_dir_all(home.join("index")).unwrap();
+    fs::write(home.join("index/index.sqlite"), "index").unwrap();
+    fs::create_dir_all(home.join("data/recall/Models")).unwrap();
+    fs::write(home.join("data/recall/Models/model.gguf"), "model").unwrap();
+
+    let installed = installation(&home.join("usr/lib/recall-for-omarchy"));
+    let path = format!("{}:{}", stubs.display(), std::env::var("PATH").unwrap());
+    let environment = fixture.command();
+    let mut setup = Command::new(&installed);
+    setup
+        .envs(environment.get_envs().filter_map(|(k, v)| v.map(|v| (k, v))))
+        .env("PATH", &path)
+        .env("OMARCHY_PATH", &shell)
+        .arg("setup")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = spawn_copied(&mut setup).wait_with_output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+
+    let installed = fs::canonicalize(&installed).unwrap();
+    let engine = installed.with_file_name("recall-engine");
+    let text = |path: &std::path::Path| fs::read_to_string(path).unwrap();
+    assert_eq!(text(&bin.join("recall")), format!("#!/bin/sh\nexec '{}' \"$@\"\n", installed.display()));
+    assert_eq!(text(&bin.join("recall-client")), format!("#!/bin/sh\nexec '{}' client \"$@\"\n", installed.display()));
+    assert_eq!(text(&bin.join("recall-engine")), format!("#!/bin/sh\nexec '{}' \"$@\"\n", engine.display()));
+    assert!(text(&bin.join("recall-shell")).contains(&shell.display().to_string()));
+    assert_eq!(text(&bin.join("unrelated")), "#!/bin/sh\necho mine\n");
+    let leftovers: Vec<_> = fs::read_dir(&bin).unwrap().chain(fs::read_dir(&units).unwrap())
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(".bak."))
+        .collect();
+    assert!(leftovers.is_empty(), "our own launchers and unit need no backups: {leftovers:?}");
+    assert!(text(&units.join("recall-for-omarchy.service")).contains(&format!("ExecStart=\"{}\" daemon", installed.display())));
+    assert!(!home.join("data/recall-for-omarchy").exists(), "the unused tarball releases are removed");
+    assert_eq!(fs::read(&settings).unwrap(), before);
+    assert_eq!(text(&home.join("index/index.sqlite")), "index");
+    assert_eq!(text(&home.join("data/recall/Models/model.gguf")), "model");
+    assert_eq!(text(&bindings), keys);
+    assert_eq!(text(&plugin.join("SearchPanel.qml")), include_str!("../omarchy/plugin/SearchPanel.qml"));
+    assert!(!fs::read_dir(&plugin).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().contains(".bak.")));
+    let commands = text(&log);
+    assert!(commands.contains("systemctl --user restart recall-for-omarchy.service"), "{commands}");
+    assert!(commands.contains("omarchy plugin enable ferdous.recall"), "{commands}");
+    assert!(!commands.contains("hyprctl"), "the existing keybinding is kept: {commands}");
+
+    // A package update replaces the files; the restarted service refreshes the user's copies.
+    fs::write(plugin.join("SearchPanel.qml"), "panel from the previous version").unwrap();
+    let skill = home.join(".agents/skills/recall/SKILL.md");
+    fs::write(&skill, "skill from the previous version").unwrap();
+    let mut daemon = Command::new(&installed);
+    daemon
+        .envs(environment.get_envs().filter_map(|(k, v)| v.map(|v| (k, v))))
+        .env("PATH", &path)
+        .env("OMARCHY_PATH", &shell)
+        .arg("daemon")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    fixture.daemon = Some(spawn_copied(&mut daemon));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while text(&skill) != include_str!("../omarchy/skills/recall/SKILL.md")
+        || text(&plugin.join("SearchPanel.qml")) != include_str!("../omarchy/plugin/SearchPanel.qml")
+    {
+        assert!(Instant::now() < deadline, "the service did not refresh the panel and skill");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}

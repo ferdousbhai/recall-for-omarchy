@@ -25,7 +25,10 @@ fn main() {
     // Prefer bundled libraries when relocated; fall back to the source build for development.
     println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
     println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../lib");
-    println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib.display());
+    // Packages keep only the relative paths: an absolute build folder would be a library search path on every machine.
+    if std::env::var_os("RECALL_RELOCATABLE").is_none() {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib.display());
+    }
     println!("cargo:rustc-env=RECALL_LLAMA_LIB_DIR={}", lib.display());
     // The llama.cpp release, for logs and `recall status`.
     let header = std::fs::read_to_string(include.join("llama-build.h")).unwrap_or_default();
@@ -34,4 +37,5 @@ fn main() {
     println!("cargo:rerun-if-changed=csrc/llama_shim.c");
     println!("cargo:rerun-if-changed={}", include.display());
     println!("cargo:rerun-if-env-changed=RECALL_LLAMA_DIR");
+    println!("cargo:rerun-if-env-changed=RECALL_RELOCATABLE");
 }

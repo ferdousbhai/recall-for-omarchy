@@ -637,6 +637,12 @@ pub(super) fn run() -> Result<i32> {
             let _ = reply.send(owner.engine_request_inner(&request));
         }
     });
+    // After a package update the restarted service brings this user's panel and skill up to date.
+    thread::spawn(|| {
+        if let Err(e) = super::install::refresh() {
+            eprintln!("Refreshing the panel and skill: {e}");
+        }
+    });
     if std::env::var("RECALL_OFFLINE").as_deref() != Ok("1") {
         download(Arc::clone(&state));
     } else {
