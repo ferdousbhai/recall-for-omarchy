@@ -10,7 +10,7 @@ version=$1 tag=v$1
 [[ $(vercmp "$version" "$pkgver") -gt 0 ]] || { echo "Choose a version newer than $pkgver." >&2; exit 1; }
 [[ -z $(git status --porcelain) ]] || { echo 'Commit your changes first.' >&2; exit 1; }
 gh_repo=${url#https://github.com/}
-# This checkout also tracks the upstream fork (origin); releases go to the remote for $gh_repo.
+# This checkout also tracks the project it was forked from (upstream); releases go to the remote for $gh_repo.
 remote=$(git remote -v | awk -v repo="$gh_repo" '$3 == "(push)" && $2 ~ ("github\\.com[:/]" repo "(\\.git)?$") { print $1; exit }')
 [[ -n $remote ]] || { echo "No git remote points at $gh_repo." >&2; exit 1; }
 git fetch -q "$remote" main --tags
