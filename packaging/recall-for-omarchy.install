@@ -19,5 +19,7 @@ post_remove() {
   printf '%s\n' \
     'Per-user files remain. As your desktop user: systemctl --user disable --now recall-for-omarchy.service' \
     'and see "Remove integration" in https://github.com/ferdousbhai/recall-for-omarchy/blob/main/omarchy/README.md' \
-    'Settings, indexes and models stay until you delete ~/.config/recall and ~/.local/share/recall.'
+    'Settings and indexes stay until you delete ~/.config/recall and ~/.local/share/recall.' \
+    'The model stays in the Hugging Face cache, which other apps can share. If none use it:' \
+    '  rm -rf "${HF_HUB_CACHE:-${HF_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}/huggingface}/hub}/models--ggml-org--embeddinggemma-2-GGUF"'
 }

@@ -31,7 +31,18 @@ pub(super) fn defaults() -> Value {
     json!({"roots": roots, "code_roots": [], "excluded_folders": [], "excluded_types": [],
         "code_excluded": [], "code_editor": "nvim", "index_on_battery": true,
         "encoder_idle_seconds": 120,
-        "index_directory": paths::default_index(), "models_directory": model_files::installed()})
+        "index_directory": paths::default_index(), "models_directory": model_files::default_folder()})
+}
+/// Replace a saved `models_directory` with the folder it stands for (null or empty: the default). Anything else, such as
+/// a relative path, stays for `validate_config` to refuse.
+fn settle_models(config: &mut Value) {
+    let folder = match config["models_directory"].as_str() {
+        None if config["models_directory"].is_null() => model_files::default_folder(),
+        Some("") => model_files::default_folder(),
+        Some(saved) if Path::new(saved).is_absolute() => model_files::resolve_setting(saved),
+        _ => return,
+    };
+    config["models_directory"] = json!(folder);
 }
 pub(super) fn load_config() -> Result<Value> {
     let mut value = defaults();
@@ -46,6 +57,7 @@ pub(super) fn load_config() -> Result<Value> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
         Err(e) => return Err(e.into()),
     }
+    settle_models(&mut value);
     validate_config(&value)?;
     Ok(value)
 }
@@ -93,7 +105,12 @@ pub(super) fn validate_config(value: &Value) -> Result<()> {
 }
 pub(super) fn save_config(value: &Value) -> Result<()> {
     validate_config(value)?;
-    atomic_write(&config_path(), &serde_json::to_vec_pretty(value)?)
+    // The default isn't saved, or it would stop following the pin and the Hugging Face variables.
+    let mut saved = value.clone();
+    if value["models_directory"].as_str().is_some_and(model_files::follows_default) {
+        saved.as_object_mut().context("Settings must be an object")?.remove("models_directory");
+    }
+    atomic_write(&config_path(), &serde_json::to_vec_pretty(&saved)?)
 }
 pub(super) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     fs::create_dir_all(path.parent().context("Missing parent directory")?)?;
@@ -176,7 +193,7 @@ fn output(reply: Value) -> i32 {
         0
     }
 }
-const HELP: &str = "recall — local semantic search for files and code (JSON output)\n\nCommands:\n  search QUERY [--code] [--kind KIND] [--limit 1..100] [--keyword-only]\n  text SEGMENT_ID [--code]\n  status | doctor | pause | resume\n  capabilities                        shared API and model revision\n  rank COLLECTION QUERY               rank JSON records from stdin (32 MiB maximum)\n  forget COLLECTION                   delete that collection’s cached vectors\n  models                              pinned model download manifest\n  settings | toggle\n  config [set KEY JSON_VALUE]\n  skill [install]\n  setup [--skip-ocr]\n  ocr                                 system OCR languages and availability\n\nExit codes: 0 success (including no matches), 1 runtime error, 2 invalid arguments.\nSearch requires recall-for-omarchy.service. Settings opens the native Omarchy panel.";
+const HELP: &str = "recall — local semantic search for files and code (JSON output)\n\nCommands:\n  search QUERY [--code] [--kind KIND] [--limit 1..100] [--keyword-only]\n  text SEGMENT_ID [--code]\n  status | doctor | pause | resume\n  capabilities                        shared API and model revision\n  rank COLLECTION QUERY               rank JSON records from stdin (32 MiB maximum)\n  forget COLLECTION                   delete that collection’s cached vectors\n  models [download]                   pinned model manifest with local paths; download the files now\n  settings | toggle\n  config [set KEY JSON_VALUE]\n  skill [install]\n  setup [--skip-ocr]\n  ocr                                 system OCR languages and availability\n\nExit codes: 0 success (including no matches), 1 runtime error, 2 invalid arguments.\nSearch requires recall-for-omarchy.service. Settings opens the native Omarchy panel.";
 
 fn payload(args: &[String]) -> Result<Value> {
     let command = args.first().map(String::as_str).unwrap_or("");
@@ -336,10 +353,29 @@ pub fn run(args: Vec<String>) -> Result<i32> {
         "forget" if args.len() == 2 => Ok(output(request(
             &json!({"api":1,"op":"records.forget","collection":args[1]}),
         )?)),
-        "models" if args.len() == 1 => Ok(output(json!(model_files::ALL
-            .iter()
-            .map(|f| json!({"name":f.name,"bytes":f.bytes,"sha256":f.sha256,"url":f.url()}))
-            .collect::<Vec<_>>()))),
+        "models" if args.len() == 1 => {
+            let config = load_config()?;
+            let folder = Path::new(config["models_directory"].as_str().unwrap());
+            Ok(output(json!(model_files::ALL
+                .iter()
+                .map(|f| json!({"name":f.name,"bytes":f.bytes,"sha256":f.sha256,"url":f.url(),"path":folder.join(f.name)}))
+                .collect::<Vec<_>>())))
+        }
+        "models" if args[1..] == ["download"] => {
+            if std::env::var("RECALL_OFFLINE").as_deref() == Ok("1") {
+                bail!("RECALL_OFFLINE=1 disables downloads");
+            }
+            let config = load_config()?;
+            model_files::prepare(Path::new(config["models_directory"].as_str().unwrap()))?;
+            // Preparing can move the default folder.
+            let config = load_config()?;
+            let folder = Path::new(config["models_directory"].as_str().unwrap());
+            for file in model_files::missing(folder) {
+                eprintln!("Downloading {} ({} MB)", file.name, file.bytes / 1_000_000);
+                model_files::install(folder, &file)?;
+            }
+            Ok(output(json!({"models_directory":folder})))
+        }
         "doctor" if args.len() == 1 => {
             let result = Command::new(engine()?).arg("devices").output()?;
             if !result.status.success() {
@@ -406,6 +442,7 @@ pub fn run(args: Vec<String>) -> Result<i32> {
                 }
             };
             config[&args[2]] = value;
+            settle_models(&mut config);
             if let Err(error) = validate_config(&config) {
                 println!("{}", json!({"error":error.to_string()}));
                 return Ok(2);

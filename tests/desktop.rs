@@ -25,7 +25,11 @@ impl Fixture {
             .env("XDG_DATA_HOME", self.dir.path().join("data"))
             .env("XDG_RUNTIME_DIR", self.dir.path())
             .env("CODEX_HOME", self.dir.path().join("codex"))
-            .env("RECALL_OFFLINE", "1");
+            .env("RECALL_OFFLINE", "1")
+            .env_remove("RECALL_MODELS");
+        for name in ["HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_HOME", "XDG_CACHE_HOME"] {
+            c.env_remove(name);
+        }
         c
     }
     fn start(&mut self) {
@@ -560,4 +564,122 @@ fn setup_takes_over_a_tarball_install_and_keeps_settings_and_index() {
         assert!(Instant::now() < deadline, "the service did not refresh the panel and skill");
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+const SNAPSHOT: &str = "models--ggml-org--embeddinggemma-2-GGUF/snapshots";
+
+impl Fixture {
+    fn settings_path(&self) -> std::path::PathBuf {
+        self.dir.path().join("config/recall/settings.json")
+    }
+    fn save_models_directory(&self, saved: Option<&str>) {
+        let mut settings = json!({"roots":[],"code_roots":[],"index_directory":self.dir.path().join("index")});
+        if let Some(saved) = saved {
+            settings["models_directory"] = json!(saved);
+        }
+        fs::write(self.settings_path(), settings.to_string()).unwrap();
+    }
+    fn models_directory(&self, command: &mut Command) -> String {
+        let output = command.arg("config").output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let config: Value = serde_json::from_slice(&output.stdout).unwrap();
+        config["models_directory"].as_str().unwrap().to_string()
+    }
+    fn pinned(&self) -> String {
+        format!("{}/.cache/huggingface/hub/{SNAPSHOT}/{}", self.dir.path().display(), recall::model_files::REVISION)
+    }
+    fn saved(&self) -> Value {
+        serde_json::from_slice(&fs::read(self.settings_path()).unwrap()).unwrap()
+    }
+}
+
+#[test]
+fn the_default_model_folder_is_the_pinned_snapshot_in_the_hub_cache() {
+    let f = Fixture::new();
+    f.save_models_directory(None);
+    let revision = recall::model_files::REVISION;
+    assert_eq!(f.models_directory(&mut f.command()), f.pinned());
+    for (name, value, hub) in [
+        ("HF_HUB_CACHE", "/hub", "/hub"),
+        ("HUGGINGFACE_HUB_CACHE", "/hub2", "/hub2"),
+        ("HF_HOME", "/hf", "/hf/hub"),
+        ("XDG_CACHE_HOME", "/xdg", "/xdg/huggingface/hub"),
+    ] {
+        let mut command = f.command();
+        command.env(name, value);
+        assert_eq!(f.models_directory(&mut command), format!("{hub}/{SNAPSHOT}/{revision}"), "{name}");
+    }
+    let mut command = f.command();
+    command.env("HF_HUB_CACHE", "/first").env("HF_HOME", "/second").env("XDG_CACHE_HOME", "/third");
+    assert_eq!(f.models_directory(&mut command), format!("/first/{SNAPSHOT}/{revision}"));
+
+    let output = f.command().arg("models").output().unwrap();
+    let files: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(files[0]["path"], format!("{}/{}", f.pinned(), recall::model_files::TEXT.name));
+}
+
+#[test]
+fn saved_model_folders_follow_the_pin_unless_customized() {
+    let f = Fixture::new();
+    let home = f.dir.path().display().to_string();
+    // What an earlier version saved, and this owner's frozen snapshot of an older revision: both mean the default.
+    f.save_models_directory(Some(&format!("{home}/data/recall/Models")));
+    assert_eq!(f.models_directory(&mut f.command()), f.pinned());
+    f.save_models_directory(Some(&format!("{home}/.cache/huggingface/hub/{SNAPSHOT}/0000000")));
+    assert_eq!(f.models_directory(&mut f.command()), f.pinned());
+    f.save_models_directory(Some(&f.pinned()));
+    assert_eq!(f.models_directory(&mut f.command()), f.pinned());
+    // A snapshot in a hub cache elsewhere stays there, at the pinned revision.
+    f.save_models_directory(Some(&format!("/mnt/models/hub/{SNAPSHOT}/0000000")));
+    assert_eq!(f.models_directory(&mut f.command()), format!("/mnt/models/hub/{SNAPSHOT}/{}", recall::model_files::REVISION));
+    // A customized folder is honoured, and survives saving other settings.
+    f.save_models_directory(Some("/mnt/models/mine"));
+    assert_eq!(f.models_directory(&mut f.command()), "/mnt/models/mine");
+    let set = f.command().args(["config", "set", "index_on_battery", "false"]).output().unwrap();
+    assert!(set.status.success());
+    assert_eq!(f.saved()["models_directory"], "/mnt/models/mine");
+}
+
+#[test]
+fn the_default_is_never_frozen_into_settings_and_there_is_a_way_back_to_it() {
+    let f = Fixture::new();
+    f.save_models_directory(Some(&f.pinned()));
+    assert!(f.command().args(["config", "set", "index_on_battery", "false"]).output().unwrap().status.success());
+    assert!(f.saved().get("models_directory").is_none(), "{}", f.saved());
+    assert_eq!(f.saved()["index_on_battery"], false);
+
+    assert!(f.command().args(["config", "set", "models_directory", "\"/mnt/mine\""]).output().unwrap().status.success());
+    assert_eq!(f.saved()["models_directory"], "/mnt/mine");
+    let reset = f.command().args(["config", "set", "models_directory", "null"]).output().unwrap();
+    assert!(reset.status.success());
+    assert!(f.saved().get("models_directory").is_none());
+    assert_eq!(f.models_directory(&mut f.command()), f.pinned());
+
+    // Still refused, and the settings are untouched.
+    let relative = f.command().args(["config", "set", "models_directory", "\"relative\""]).output().unwrap();
+    assert_eq!(relative.status.code(), Some(2));
+    assert!(f.saved().get("models_directory").is_none());
+}
+
+#[test]
+fn the_daemon_uses_a_legacy_folder_until_its_files_are_dealt_with() {
+    let mut f = Fixture::new();
+    f.save_models_directory(None);
+    let legacy = f.dir.path().join("data/recall/Models");
+    fs::create_dir_all(&legacy).unwrap();
+    let text = recall::model_files::TEXT;
+    // The right size, so it counts as an install; sparse, so it costs nothing and fails its checksum.
+    fs::File::create(legacy.join(text.name)).unwrap().set_len(text.bytes).unwrap();
+    assert_eq!(f.models_directory(&mut f.command()), legacy.display().to_string());
+
+    f.start();
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while f.rpc(json!({"op":"config"}))["config"]["models_directory"] != f.pinned() {
+        assert!(Instant::now() < deadline, "the folder never moved to the cache");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(legacy.join(format!("{}.invalid", text.name)).exists(), "a wrong file is set aside, not deleted");
+    assert!(!legacy.join(text.name).exists());
+    assert!(!f.dir.path().join(".cache/huggingface/hub").join(SNAPSHOT).join(recall::model_files::REVISION).join(text.name).exists());
+    assert_eq!(f.rpc(json!({"op":"capabilities","api":1}))["models_directory"], f.pinned());
 }

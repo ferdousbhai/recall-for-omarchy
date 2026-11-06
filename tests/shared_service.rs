@@ -110,7 +110,10 @@ impl Drop for Fixture {
 #[test]
 fn one_worker_is_shared_and_app_records_never_cross_scopes() {
     let f = Fixture::new();
-    assert_eq!(f.request(json!({"op":"capabilities"}))["api"], 1);
+    let capabilities = f.request(json!({"op":"capabilities"}));
+    assert_eq!(capabilities["api"], 1);
+    assert_eq!(capabilities["model_revision"], recall::model_files::REVISION);
+    assert_eq!(capabilities["model_repository"], recall::model_files::REPOSITORY);
     let records =
         json!([{"id":"a","title":"alpha","text":"alpha"},{"id":"b","title":"beta","text":"beta"}]);
     let ranked = f.rank("mail:work", records.clone());

@@ -14,7 +14,7 @@
 # ~/.config/hypr/bindings.lua (backed up first; `| sudo RECALL_NO_KEYBINDING=1 bash`
 # skips it), the user launchers and the agent skill. That also takes over an
 # install made by earlier, tarball-based installers; settings, indexes and
-# models are kept. A first setup selects ~/Documents and ~/Pictures (when they
+# models are kept (models in the standard Hugging Face cache). A first setup selects ~/Documents and ~/Pictures (when they
 # exist); the embedding models download once there are folders to index.
 set -euo pipefail
 

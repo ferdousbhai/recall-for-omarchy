@@ -56,10 +56,10 @@ Options:
   --code-stretch N     characters a stretch of code holds at most (default 1800)
 
 The model: EmbeddingGemma 2 on llama.cpp, from $RECALL_MODELS (only there, when set), else
-{} or the Hugging Face cache.
+the pinned snapshot in the Hugging Face cache ({}).
 RECALL_DEVICE=cpu|cuda|vulkan picks where it runs (default: CUDA, else Vulkan, else the CPU).",
         paths::tilde(&paths::default_index()),
-        paths::tilde(&model_files::installed())
+        paths::tilde(&model_files::hub_snapshot())
     )
 }
 

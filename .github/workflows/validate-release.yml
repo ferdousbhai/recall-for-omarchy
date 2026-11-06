@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Release tag to validate (v0.6.0 or later; earlier releases shipped tarballs)
+        description: Release tag to validate (v0.7.0 or later; earlier releases have no `recall models download`)
         required: true
 permissions:
   contents: read

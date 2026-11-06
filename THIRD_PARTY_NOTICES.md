@@ -50,7 +50,8 @@ The model
 EmbeddingGemma 2 by Google, in ggml-org's GGUF conversion
 (https://huggingface.co/ggml-org/embeddinggemma-2-GGUF), is released under the
 Apache License 2.0 (https://www.apache.org/licenses/LICENSE-2.0). Recall doesn't
-include it: it's downloaded from Hugging Face the first time it runs.
+include it: it's downloaded from Hugging Face into the standard Hugging Face
+cache the first time it runs.
 
 ================================================================================
 On Linux, also

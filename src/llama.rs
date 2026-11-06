@@ -68,13 +68,15 @@ pub struct LlamaModels {
 }
 
 impl LlamaModels {
-    /// The folders to look in, first match wins. `$RECALL_MODELS` is the app's choice and the only place it looks
-    /// then: the developer's Hugging Face cache mustn't hide a download that's missing. Without it (the CLI): the
-    /// app's data folder, then the Hugging Face cache.
+    /// The folders to look in, first match wins. `$RECALL_MODELS` is the service's resolved choice and the only place
+    /// it looks then. That choice is usually the hub cache now, but a customized folder must still mean that folder: a
+    /// copy elsewhere mustn't hide a missing file there, or feed a test its developer's weights. Without it (the
+    /// standalone engine): the pinned revision's snapshot, then the folder earlier versions used. Only ever the pinned
+    /// revision, never another snapshot or whatever `main` is, because other weights would invalidate indexes.
     pub fn folders() -> Vec<PathBuf> {
         match std::env::var("RECALL_MODELS") {
             Ok(chosen) if !chosen.is_empty() => vec![PathBuf::from(chosen)],
-            _ => vec![model_files::installed(), model_files::hugging_face_snapshot()],
+            _ => vec![model_files::hub_snapshot(), model_files::legacy_folder()],
         }
     }
 

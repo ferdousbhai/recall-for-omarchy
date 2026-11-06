@@ -54,6 +54,7 @@ struct State {
     rpc_tx: mpsc::SyncSender<RpcMessage>,
     shared: super::shared::Service,
     model_requests: AtomicUsize,
+    models_prepared: AtomicBool,
     config: Mutex<Value>,
     status: Mutex<Value>,
     rpc: Mutex<Option<Rpc>>,
@@ -151,7 +152,7 @@ impl State {
         let op = value["op"].as_str().context("Missing operation")?;
         match op {
             "capabilities" => Ok(
-                json!({"api":1,"operations":["embed","records.search","records.forget"],"source":recall::llama::model_info().vector_source(),"models_directory":self.config.lock().unwrap()["models_directory"],"batch_size":32}),
+                json!({"api":1,"operations":["embed","records.search","records.forget"],"source":recall::llama::model_info().vector_source(),"model_repository":model_files::REPOSITORY,"model_revision":model_files::REVISION,"models_directory":self.config.lock().unwrap()["models_directory"],"batch_size":32}),
             ),
             "embed" | "records.search" | "records.forget" => {
                 let config = self.config.lock().unwrap().clone();
@@ -186,14 +187,7 @@ impl State {
                     let folder = Path::new(config["models_directory"].as_str().unwrap());
                     let received: u64 = model_files::ALL
                         .iter()
-                        .map(|file| {
-                            fs::metadata(folder.join(file.name))
-                                .or_else(|_| {
-                                    fs::metadata(folder.join(format!("{}.part", file.name)))
-                                })
-                                .map(|m| m.len().min(file.bytes))
-                                .unwrap_or(0)
-                        })
+                        .map(|file| model_files::received(folder, file))
                         .sum();
                     let total: u64 = model_files::ALL.iter().map(|f| f.bytes).sum();
                     s["download_bytes"] = received.into();
@@ -217,6 +211,7 @@ impl State {
                     }
                     config[k] = v.clone();
                 }
+                settle_models(&mut config);
                 // Reject invalid values here instead of saving a file the daemon would then refuse to load.
                 validate_config(&config)?;
                 save_config(&config)?;
@@ -354,6 +349,10 @@ impl State {
         }
     }
     fn start_helper(self: &Arc<Self>, backfill: bool) -> Result<()> {
+        // Nothing is embedded with model files that haven't been checked; preparing asks for a sync when it's done.
+        if !self.models_prepared.load(Ordering::Acquire) {
+            return Ok(());
+        }
         let config = self.config.lock().unwrap().clone();
         if self.paused.load(Ordering::Acquire)
             || (folders(&config, "roots").is_empty() && folders(&config, "code_roots").is_empty())
@@ -476,112 +475,78 @@ fn backfill_allowed(config: &Value) -> bool {
     .unwrap_or(false);
     !saver
 }
-fn download(state: Arc<State>) {
-    thread::spawn(move || loop {
-        let config = state.config.lock().unwrap().clone();
-        let folder = Path::new(config["models_directory"].as_str().unwrap());
-        let wanted = if !folders(&config, "roots").is_empty()
-            || !folders(&config, "code_roots").is_empty()
-        {
-            3
-        } else {
-            state.model_requests.load(Ordering::Acquire)
-        };
-        let missing: Vec<_> = model_files::missing(folder)
-            .into_iter()
-            .filter(|f| {
-                wanted
-                    & if f.name == model_files::TEXT.name {
-                        1
-                    } else {
-                        2
-                    }
-                    != 0
-            })
-            .collect();
-        if wanted == 0 || missing.is_empty() {
-            state.status.lock().unwrap()["download"] = json!(if wanted == 0 && !model_files::missing(folder).is_empty() {
-                    "needed"
-                } else {
-                    "ready"
-                });
-            thread::sleep(Duration::from_secs(5));
-            continue;
-        }
-        state.status.lock().unwrap()["download"] = json!("downloading");
-        let result = (|| -> Result<()> {
-            fs::create_dir_all(folder)?;
-            let lock = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .mode(0o600)
-                .open(folder.join(".download.lock"))?;
-            if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
-                return Err(io::Error::last_os_error().into());
-            }
-            for file in missing {
-                if folder.join(file.name).is_file() {
-                    continue;
+/// Check the model folder whenever it changes (moving an earlier install's files in on the way), then download what's
+/// wanted and missing. A check and a move need no network, so they also run offline.
+fn maintain_models(state: Arc<State>, offline: bool) {
+    thread::spawn(move || {
+        let mut prepared = None;
+        loop {
+            let config = state.config.lock().unwrap().clone();
+            let saved = config["models_directory"].as_str().unwrap();
+            let folder = model_files::resolve_setting(saved);
+            if prepared.as_ref() != Some(&folder) {
+                if let Err(e) = model_files::prepare(&folder) {
+                    eprintln!("Models: {e}");
                 }
-                let temporary = folder.join(format!("{}.part", file.name));
-                if let Some(cached) = model_files::cached_copy(&file) {
-                    if model_files::sha256(&cached)? != file.sha256 {
-                        bail!("Cached model checksum verification failed");
-                    }
-                    if temporary.exists() {
-                        fs::remove_file(&temporary)?;
-                    }
-                    if fs::hard_link(&cached, &temporary).is_err() {
-                        fs::copy(cached, &temporary)?;
-                    }
-                } else {
-                    checked(
-                        Command::new("curl")
-                            .args([
-                                "-fL",
-                                "--retry",
-                                "3",
-                                "--connect-timeout",
-                                "15",
-                                "--speed-limit",
-                                "1024",
-                                "--speed-time",
-                                "60",
-                                "-C",
-                                "-",
-                                "-o",
-                            ])
-                            .arg(&temporary)
-                            .arg(file.url())
-                            .stdout(Stdio::null())
-                            .stderr(Stdio::null()),
-                    )?;
-                }
-                if temporary.metadata()?.len() != file.bytes
-                    || model_files::sha256(&temporary)? != file.sha256
-                {
-                    fs::remove_file(temporary)?;
-                    bail!("Model checksum verification failed");
-                }
-                fs::rename(temporary, folder.join(file.name))?;
-            }
-            Ok(())
-        })();
-        match result {
-            Ok(()) => {
-                state.status.lock().unwrap()["download"] = json!("ready");
+                // Moving the files moves the folder; the settings poll tells the workers within a second.
+                prepared = Some(model_files::resolve_setting(saved));
+                state.models_prepared.store(true, Ordering::Release);
                 state.sync.store(true, Ordering::Release);
+                continue;
             }
-            Err(e) => {
-                let mut s = state.status.lock().unwrap();
-                s["download"] = json!("retrying");
-                s["line"] = json!(format!("Model download: {e}"));
+            if offline {
+                state.status.lock().unwrap()["download"] =
+                    json!(if model_files::missing(&folder).is_empty() { "ready" } else { "offline" });
+                thread::sleep(Duration::from_secs(5));
+            } else {
+                download_missing(&state, &config, &folder);
             }
         }
-        thread::sleep(Duration::from_secs(30));
     });
+}
+fn download_missing(state: &State, config: &Value, folder: &Path) {
+    let wanted = if !folders(config, "roots").is_empty()
+        || !folders(config, "code_roots").is_empty()
+    {
+        3
+    } else {
+        state.model_requests.load(Ordering::Acquire)
+    };
+    let missing: Vec<_> = model_files::missing(folder)
+        .into_iter()
+        .filter(|f| {
+            wanted
+                & if f.name == model_files::TEXT.name {
+                    1
+                } else {
+                    2
+                }
+                != 0
+        })
+        .collect();
+    if wanted == 0 || missing.is_empty() {
+        state.status.lock().unwrap()["download"] = json!(if wanted == 0 && !model_files::missing(folder).is_empty() {
+                "needed"
+            } else {
+                "ready"
+            });
+        thread::sleep(Duration::from_secs(5));
+        return;
+    }
+    state.status.lock().unwrap()["download"] = json!("downloading");
+    let result = missing.iter().try_for_each(|file| model_files::install(folder, file));
+    match result {
+        Ok(()) => {
+            state.status.lock().unwrap()["download"] = json!("ready");
+            state.sync.store(true, Ordering::Release);
+        }
+        Err(e) => {
+            let mut s = state.status.lock().unwrap();
+            s["download"] = json!("retrying");
+            s["line"] = json!(format!("Model download: {e}"));
+        }
+    }
+    thread::sleep(Duration::from_secs(30));
 }
 pub(super) fn run() -> Result<i32> {
     // Acquire an exclusive lock before touching the socket; a second daemon cannot replace a live one.
@@ -618,6 +583,7 @@ pub(super) fn run() -> Result<i32> {
         rpc_tx,
         shared: super::shared::Service::start(),
         model_requests: AtomicUsize::new(0),
+        models_prepared: AtomicBool::new(false),
         config: Mutex::new(config.clone()),
         status: Mutex::new(
             json!({"line":"Starting…","download":"needed","paused":false,"files":0,"searchable":0,"pending":0,"code_files":0,"code_pending":0}),
@@ -643,19 +609,7 @@ pub(super) fn run() -> Result<i32> {
             eprintln!("Refreshing the panel and skill: {e}");
         }
     });
-    if std::env::var("RECALL_OFFLINE").as_deref() != Ok("1") {
-        download(Arc::clone(&state));
-    } else {
-        state.status.lock().unwrap()["download"] = json!(if model_files::missing(Path::new(
-            config["models_directory"].as_str().unwrap()
-        ))
-        .is_empty()
-        {
-            "ready"
-        } else {
-            "offline"
-        });
-    }
+    maintain_models(Arc::clone(&state), std::env::var("RECALL_OFFLINE").as_deref() == Ok("1"));
     let background = Arc::clone(&state);
     thread::spawn(move || {
         let mut config = config;

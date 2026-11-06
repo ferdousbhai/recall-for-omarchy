@@ -1,8 +1,9 @@
-Recall for Omarchy v0.6.0 installs from a signed pacman repository and updates with the rest of the system.
+Recall for Omarchy v0.7.0 keeps its model in the standard Hugging Face cache, so `hf`, llama.cpp and other local apps can see the weights and there is one copy.
 
-- Install or move to the package with `curl -fsSL https://ferdousbhai.com/recall/install.sh | sudo bash`. It adds the [recall-for-omarchy] repository (signed with the same key as Ferdous Bhai's other Omarchy apps), installs `recall-for-omarchy` with its dependencies (and `vulkan-asahi` on Apple hardware), then runs `recall setup` for you in your desktop session. `RECALL_NO_KEYBINDING=1` still skips the keybinding: `| sudo RECALL_NO_KEYBINDING=1 bash`.
-- Updates arrive through `omarchy update`. An upgrade restarts the running service, which then refreshes your panel and agent skill.
-- Moving from an earlier tarball install keeps your settings, index and models; setup points the launchers and the service at the package and removes the old copies under `~/.local/share/recall-for-omarchy/releases`.
-- Packages are built natively for x86_64 and aarch64 from the tagged source, with only relative library search paths.
+- The default location is `$HF_HUB_CACHE`, `$HF_HOME/hub`, `$XDG_CACHE_HOME/huggingface/hub` or `~/.cache/huggingface/hub`, in a real hub layout at the pinned revision. Files are still SHA-256 verified before they are published, and anything already in that snapshot is checked when the service starts.
+- Upgrading moves files from `~/.local/share/recall/Models` into the cache without downloading them again, and your index stays valid. Search keeps working during the move.
+- A `models_directory` you set yourself is still honoured. A setting that points at a snapshot of this model now follows the pinned revision, so a future pin can't land in a stale folder. `recall config set models_directory null` returns to the default.
+- Uninstalling leaves the model in the cache, because other apps can share it; the package's removal message says how to delete it.
+- `recall models download` fetches the files without the service, and `recall models` lists where they are.
 
 Based on pdstn12/Recall (MIT), inspired by ARahim3/DigUp.
