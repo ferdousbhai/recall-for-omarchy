@@ -37,10 +37,14 @@ fn launcher(path: &Path, body: &str) -> Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
     Ok(())
 }
+/// Beside the skill, saying whose it is, as other tools' skills do: what syncs a person's own skills between their
+/// computers (Omacloud) leaves a marked folder to the Recall installed on each.
+const SKILL_MARKER: &str = ".managed-by-recall";
 pub(super) fn skill() -> Result<Value> {
     let shared = paths::home().join(".agents/skills/recall");
     fs::create_dir_all(&shared)?;
     atomic_write(&shared.join("SKILL.md"), SKILL.as_bytes())?;
+    atomic_write(&shared.join(SKILL_MARKER), b"")?;
     let codex = std::env::var_os("CODEX_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| paths::home().join(".codex"))
@@ -128,8 +132,15 @@ pub(super) fn refresh() -> Result<()> {
         }
     }
     let skill = paths::home().join(".agents/skills/recall/SKILL.md");
-    if skill.is_file() && fs::read(&skill)? != SKILL.as_bytes() {
-        atomic_write(&skill, SKILL.as_bytes())?;
+    if skill.is_file() {
+        if fs::read(&skill)? != SKILL.as_bytes() {
+            atomic_write(&skill, SKILL.as_bytes())?;
+        }
+        // A skill installed before the marker existed gets it now.
+        let marker = skill.with_file_name(SKILL_MARKER);
+        if !marker.exists() {
+            atomic_write(&marker, b"")?;
+        }
     }
     Ok(())
 }

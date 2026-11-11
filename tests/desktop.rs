@@ -91,6 +91,8 @@ fn skill_is_embedded_and_custom_agent_directories_are_preserved() {
     }
     assert_eq!(fs::read_to_string(custom.join("custom")).unwrap(), "keep");
     assert!(f.dir.path().join("codex/skills/recall").is_symlink());
+    // Marked as Recall's own, so a tool syncing a person's skills leaves it to each computer's Recall.
+    assert!(f.dir.path().join(".agents/skills/recall/.managed-by-recall").is_file());
 }
 #[test]
 fn cli_validates_before_contacting_service() {
@@ -548,6 +550,8 @@ fn setup_takes_over_a_tarball_install_and_keeps_settings_and_index() {
     fs::write(plugin.join("SearchPanel.qml"), "panel from the previous version").unwrap();
     let skill = home.join(".agents/skills/recall/SKILL.md");
     fs::write(&skill, "skill from the previous version").unwrap();
+    let marker = home.join(".agents/skills/recall/.managed-by-recall");
+    fs::remove_file(&marker).unwrap();
     let mut daemon = Command::new(&installed);
     daemon
         .envs(environment.get_envs().filter_map(|(k, v)| v.map(|v| (k, v))))
@@ -562,6 +566,10 @@ fn setup_takes_over_a_tarball_install_and_keeps_settings_and_index() {
         || text(&plugin.join("SearchPanel.qml")) != include_str!("../omarchy/plugin/SearchPanel.qml")
     {
         assert!(Instant::now() < deadline, "the service did not refresh the panel and skill");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    while !marker.is_file() {
+        assert!(Instant::now() < deadline, "the service did not mark the skill as its own");
         std::thread::sleep(Duration::from_millis(20));
     }
 }
