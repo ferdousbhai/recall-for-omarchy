@@ -34,7 +34,7 @@ fn usage() -> String {
                                           \"code: <words>\" searches the code index
   recall-engine devices                          JSON diagnostics: selected GPU/CPU and backend plugins
   recall-engine status                           what's in the index
-  recall-engine eval <queries.json> [-n 10]      recall-engine of known answers (see evals/; \"code: …\" queries search code)
+  recall-engine eval <queries.json> [-n 10]      recall of known answers (see evals/; \"code: …\" queries search code)
   recall-engine index-service <folder>... [--code-root DIR]... [--code-exclude DIR]... [--backfill] [--prune]
                                           the app's indexing helper (JSON lines)
   recall-engine worker [--text-only]             the model as a process (JSON lines)
