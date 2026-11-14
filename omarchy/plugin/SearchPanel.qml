@@ -275,7 +275,7 @@ Item {
               RecallIcon { anchors.centerIn: parent; width: 26; height: 26; ink: Qt.alpha(Theme.Color.menu.selectedText, 0.8) }
             }
             Text { text: root.searching ? "Finding the right moment…" : query.text.trim() ? "No matches found" : "Remember the detail. Find the file."; color: Theme.Color.menu.text; font.pixelSize: 16; font.weight: Font.Medium; font.family: Theme.Style.fontFamily; Layout.fillWidth: true; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.Wrap }
-            Text { text: root.searching ? "Searching your selected folders" : query.text.trim() ? "Try a different detail, phrase, or filename." : "Describe a document, a photo, or a moment in a recording."; color: Qt.alpha(Theme.Color.menu.text, 0.5); font.pixelSize: 12; font.family: Theme.Style.fontFamily; Layout.fillWidth: true; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.Wrap }
+            Text { visible: text.length > 0; text: root.searching ? "" : query.text.trim() ? "Try a different detail, phrase, or filename." : "Describe a document, a photo, or a moment in a recording."; color: Qt.alpha(Theme.Color.menu.text, 0.5); font.pixelSize: 12; font.family: Theme.Style.fontFamily; Layout.fillWidth: true; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.Wrap }
             RowLayout {
               visible: !query.text.trim() && list.width >= 400
               Layout.alignment: Qt.AlignHCenter

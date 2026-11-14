@@ -70,7 +70,6 @@ ScrollView {
     PathInput { id: codeFolders; placeholderText: "/home/you/projects" }
     Divider {}
     SectionTitle { text: "Keep out of search" }
-    Description { text: "Excluded paths and file types are skipped inside your selected folders." }
     Description { text: "Excluded folders"; color: Qt.alpha(Theme.Color.menu.text, 0.8) }
     PathInput { id: excluded; placeholderText: "Absolute paths, one per line" }
     Description { text: "Excluded code folders"; color: Qt.alpha(Theme.Color.menu.text, 0.8) }
