@@ -96,7 +96,7 @@ echo "systemd-run XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS=$DBU
 exit "${STUB_SETUP_STATUS:-0}"
 STUB
 fingerprint=$(sed -n 's/^SIGNING_KEY_FINGERPRINT=//p' install.sh)
-printf '#!/bin/sh\necho "fpr:::::::::%s:"\n' "$fingerprint" >"$work/bin/gpg"
+printf '#!/bin/sh\necho "pub:u:4096:1:A89CA1A6A1E74251:1:::u:::scESC:"\necho "fpr:::::::::%s:"\n' "$fingerprint" >"$work/bin/gpg"
 chmod 755 "$work/bin/"*
 export PATH="$work/bin:$PATH" PACMAN_LOG="$work/pacman.log" SETUP_LOG="$work/setup.log" SUDO_USER=root
 
@@ -194,7 +194,7 @@ check "an unsupported architecture changes nothing" [ ! -e /etc/pacman.d/recall-
 setup
 mkdir -p "$work/plain"
 cp "$work/bin/pacman" "$work/bin/pacman-key" "$work/bin/curl" "$work/bin/gpg" "$work/bin/uname" "$work/plain/"
-for tool in bash sh sed grep mktemp rm tee id getent cut install chown chmod cat env dirname basename tr sort head tail awk cmp; do
+for tool in bash sh sed grep mktemp rm tee id getent cut install chown chmod cat env dirname basename tr sort head tail awk cmp mkdir mv runuser; do
   ln -sf "$(command -v "$tool")" "$work/plain/$tool"
 done
 PATH="$work/plain" bash install.sh >"$work/plain.out" 2>&1 || true
