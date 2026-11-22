@@ -91,28 +91,110 @@ fn plugin_dir() -> PathBuf {
 /// Copy this installation's panel into the user's Omarchy plugins; true when a file changed.
 /// The plugin folder belongs to Recall, so files are replaced without backups.
 fn install_plugin(shell: &Path) -> Result<bool> {
-    let plugin = plugin_dir();
-    fs::create_dir_all(&plugin)?;
     let colors = fs::read_to_string(shell.join("shell/Commons/qmldir"))
         .unwrap_or_default()
         .contains("singleton ShellColor");
+    copy_plugin(&root()?.join("omarchy/plugin"), &plugin_dir(), colors)
+}
+/// The QML beside the manifest, and the translation catalogs in `i18n/` that the panel reads at run time. A catalog
+/// that is no longer shipped is removed, or the panel would keep showing a language's outdated strings.
+fn copy_plugin(source: &Path, plugin: &Path, colors: bool) -> Result<bool> {
     let mut changed = false;
-    for entry in fs::read_dir(root()?.join("omarchy/plugin"))? {
-        let entry = entry?;
-        if !entry.file_type()?.is_file() {
+    for folder in ["", "i18n"] {
+        let from = source.join(folder);
+        if !from.is_dir() {
             continue;
         }
-        let dest = plugin.join(entry.file_name());
-        let mut text = fs::read_to_string(entry.path())?;
-        if colors {
-            text = text.replace("Color.menu", "ShellColor.menu");
+        let to = plugin.join(folder);
+        fs::create_dir_all(&to)?;
+        let mut shipped = Vec::new();
+        for entry in fs::read_dir(&from)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            shipped.push(entry.file_name());
+            let dest = to.join(entry.file_name());
+            let mut text = fs::read_to_string(entry.path())?;
+            if colors && dest.extension().is_some_and(|e| e == "qml") {
+                text = text.replace("Color.menu", "ShellColor.menu");
+            }
+            if fs::read(&dest).ok().as_deref() != Some(text.as_bytes()) {
+                atomic_write(&dest, text.as_bytes())?;
+                changed = true;
+            }
         }
-        if fs::read(&dest).ok().as_deref() != Some(text.as_bytes()) {
-            atomic_write(&dest, text.as_bytes())?;
-            changed = true;
+        if folder == "i18n" {
+            for entry in fs::read_dir(&to)? {
+                let entry = entry?;
+                if entry.path().extension().is_some_and(|e| e == "json") && !shipped.contains(&entry.file_name()) {
+                    fs::remove_file(entry.path())?;
+                    changed = true;
+                }
+            }
         }
     }
     Ok(changed)
+}
+/// The app launcher entry, with `Name[code]` and `Comment[code]` for every language whose catalog translates
+/// `desktop.name` or `desktop.comment`: the launcher then follows the desktop's language like the panel does. The
+/// catalogs are the panel's (omarchy/plugin/i18n), so a language is added in one file.
+fn desktop_entry(exec: &str, catalogs: &Path) -> String {
+    let catalog = |path: &Path| -> Option<Value> { serde_json::from_slice(&fs::read(path).ok()?).ok() };
+    // A desktop entry is line-based, so a value is one line with backslashes doubled; anything else is left out.
+    let line = |catalog: &Value, key: &str| -> Option<String> {
+        let text = catalog[key].as_str()?.trim();
+        (!text.is_empty() && !text.chars().any(char::is_control)).then(|| text.replace('\\', "\\\\"))
+    };
+    let english = catalog(&catalogs.join("en.json")).unwrap_or(Value::Null);
+    let name = line(&english, "desktop.name").unwrap_or_else(|| "Recall".into());
+    let comment = line(&english, "desktop.comment").unwrap_or_else(|| "Search local files by meaning".into());
+    let mut entry = format!("[Desktop Entry]\nType=Application\nName={name}\n");
+    let mut translated = Vec::new();
+    for file in fs::read_dir(catalogs).into_iter().flatten().flatten() {
+        let path = file.path();
+        let code = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+        // Omarchy names a regional language `pt-BR`; a desktop entry's locale is `pt_BR`.
+        let valid = !code.is_empty() && code.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+        if valid && code != "en" && path.extension().is_some_and(|e| e == "json") {
+            if let Some(catalog) = catalog(&path) {
+                translated.push((code.replace('-', "_"), catalog));
+            }
+        }
+    }
+    translated.sort_by(|a, b| a.0.cmp(&b.0));
+    // A translation that repeats the English adds nothing; the launcher falls back to the plain key by itself.
+    for (code, catalog) in &translated {
+        if let Some(text) = line(catalog, "desktop.name").filter(|text| *text != name) {
+            entry += &format!("Name[{code}]={text}\n");
+        }
+    }
+    entry += &format!("Comment={comment}\n");
+    for (code, catalog) in &translated {
+        if let Some(text) = line(catalog, "desktop.comment").filter(|text| *text != comment) {
+            entry += &format!("Comment[{code}]={text}\n");
+        }
+    }
+    entry + &format!("Exec=\"{exec}\" toggle\nIcon=io.github.ferdousbhai.Recall\nCategories=Utility;\nTerminal=false\n")
+}
+fn desktop_file() -> PathBuf {
+    paths::support().parent().unwrap().join("applications/io.github.ferdousbhai.Recall.desktop")
+}
+/// Write the launcher entry for this installation; true when it changed.
+fn install_desktop_entry() -> Result<bool> {
+    let exec = paths::home()
+        .join(".local/bin/recall")
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('%', "%%");
+    let entry = desktop_entry(&exec, &root()?.join("omarchy/plugin/i18n"));
+    let path = desktop_file();
+    if fs::read(&path).ok().as_deref() == Some(entry.as_bytes()) {
+        return Ok(false);
+    }
+    atomic_write(&path, entry.as_bytes())?;
+    Ok(true)
 }
 fn rescan_plugins(shell: &Path) -> Result<()> {
     checked(
@@ -130,6 +212,10 @@ pub(super) fn refresh() -> Result<()> {
         if install_plugin(&shell)? {
             rescan_plugins(&shell)?;
         }
+    }
+    // The launcher entry carries the translations this version ships.
+    if desktop_file().is_file() {
+        install_desktop_entry()?;
     }
     let skill = paths::home().join(".agents/skills/recall/SKILL.md");
     if skill.is_file() {
@@ -228,14 +314,7 @@ pub(super) fn desktop() -> Result<()> {
             fs::remove_file(&old)?;
         }
     }
-    let desktop = data.join("applications/io.github.ferdousbhai.Recall.desktop");
-    let desktop_exec = bin
-        .join("recall")
-        .to_string_lossy()
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('%', "%%");
-    atomic_write(&desktop,format!("[Desktop Entry]\nType=Application\nName=Recall\nComment=Search local files by meaning\nExec=\"{desktop_exec}\" toggle\nIcon=io.github.ferdousbhai.Recall\nCategories=Utility;\nTerminal=false\n").as_bytes())?;
+    install_desktop_entry()?;
     let icon = data.join("icons/hicolor/scalable/apps/io.github.ferdousbhai.Recall.svg");
     fs::create_dir_all(icon.parent().unwrap())?;
     fs::copy(root.join("omarchy/assets/recall.svg"), icon)?;
@@ -266,4 +345,51 @@ pub(super) fn desktop() -> Result<()> {
         json!({"installed":true,"shortcut":"Super+Ctrl+Shift+F","settings":"recall settings"})
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn the_launcher_entry_is_translated_from_the_panel_catalogs() {
+        let catalogs = tempfile::tempdir().unwrap();
+        let write = |name: &str, value: Value| fs::write(catalogs.path().join(name), value.to_string()).unwrap();
+        write("en.json", json!({"desktop.name":"Recall","desktop.comment":"Search local files by meaning"}));
+        write("da.json", json!({"desktop.name":"Recall","desktop.comment":"Søg i lokale filer efter mening"}));
+        write("pt-BR.json", json!({"desktop.comment":"Pesquise arquivos locais\npelo significado","search.private":"x"}));
+        write("ar.json", json!({"desktop.name":"ريكول","desktop.comment":"ابحث في الملفات"}));
+        fs::write(catalogs.path().join("notes.txt"), "not a catalog").unwrap();
+        let entry = desktop_entry("/home/me/.local/bin/recall", catalogs.path());
+        assert_eq!(
+            entry,
+            "[Desktop Entry]\nType=Application\nName=Recall\nName[ar]=ريكول\nComment=Search local files by meaning\n\
+             Comment[ar]=ابحث في الملفات\nComment[da]=Søg i lokale filer efter mening\n\
+             Exec=\"/home/me/.local/bin/recall\" toggle\nIcon=io.github.ferdousbhai.Recall\nCategories=Utility;\nTerminal=false\n"
+        );
+        // Without catalogs the entry is still complete, in English.
+        let bare = desktop_entry("recall", &catalogs.path().join("missing"));
+        assert!(bare.contains("Name=Recall\nComment=Search local files by meaning\nExec=\"recall\" toggle\n"));
+    }
+    #[test]
+    fn the_shipped_english_catalog_names_the_launcher_entry() {
+        let catalogs = Path::new(env!("CARGO_MANIFEST_DIR")).join("omarchy/plugin/i18n");
+        let entry = desktop_entry("recall", &catalogs);
+        assert!(entry.contains("\nName=Recall\n") && entry.contains("\nComment=Search local files by meaning\n"), "{entry}");
+    }
+    #[test]
+    fn the_panel_is_copied_with_its_catalogs_and_stale_ones_are_removed() {
+        let source = tempfile::tempdir().unwrap();
+        let plugin = tempfile::tempdir().unwrap();
+        fs::create_dir(source.path().join("i18n")).unwrap();
+        fs::write(source.path().join("Panel.qml"), "color: Commons.Color.menu.text").unwrap();
+        fs::write(source.path().join("i18n/en.json"), "{\"a\":\"Color.menu\"}").unwrap();
+        fs::create_dir(plugin.path().join("i18n")).unwrap();
+        fs::write(plugin.path().join("i18n/xx.json"), "{}").unwrap();
+        assert!(copy_plugin(source.path(), plugin.path(), true).unwrap());
+        assert_eq!(fs::read_to_string(plugin.path().join("Panel.qml")).unwrap(), "color: Commons.ShellColor.menu.text");
+        // Only QML is adapted to an older shell's colour singleton; a catalog is copied as it is.
+        assert_eq!(fs::read_to_string(plugin.path().join("i18n/en.json")).unwrap(), "{\"a\":\"Color.menu\"}");
+        assert!(!plugin.path().join("i18n/xx.json").exists());
+        assert!(!copy_plugin(source.path(), plugin.path(), true).unwrap(), "a second copy changes nothing");
+    }
 }

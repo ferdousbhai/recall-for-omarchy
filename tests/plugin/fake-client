@@ -1,0 +1,40 @@
+#!/bin/bash
+# Stands in for `recall client` in the panel checks: it answers the panel's JSON lines the way the daemon would,
+# with made-up files, so the checks need no daemon, index or model. RECALL_FAKE_MODE=down answers every request
+# the way the real client does when the daemon's socket is gone.
+set -u
+config='{"roots":["/home/you/Documents","/home/you/Pictures"],"code_roots":[],"excluded_folders":[],"code_excluded":[],"excluded_types":["heic"],"code_editor":"nvim","index_on_battery":true,"encoder_idle_seconds":120,"index_directory":"/home/you/.local/share/recall/index","models_directory":"/home/you/.cache/huggingface/hub/models--ggml-org--embeddinggemma-2-GGUF/snapshots/pinned"}'
+paused=false
+hits='[
+ {"path":"/home/you/Documents/Acme/Globex master services agreement.pdf","name":"Globex master services agreement.pdf","folder":"/home/you/Documents/Acme","kind":"pdf","segment":"page","loc":2,"excerpt":"Either party may terminate this Agreement for convenience with ninety (90) days’ written notice."},
+ {"path":"/home/you/Documents/Acme/Q3 budget review.mp4","name":"Q3 budget review.mp4","folder":"/home/you/Documents/Acme/Meetings","kind":"video","segment":"frame","loc":65,"excerpt":""},
+ {"path":"/home/you/projects/billing/src/retry.rs","name":"retry.rs","folder":"/home/you/projects/billing/src","kind":"code","segment":"lines","loc":40,"loc_end":72,"excerpt":"pub fn with_backoff<T>(attempts: u32, mut operation: impl FnMut() -> Result<T>) -> Result<T> {"}
+]'
+while IFS= read -r line; do
+  id=$(jq -r '.id' <<<"$line")
+  op=$(jq -r '.op' <<<"$line")
+  if [[ ${RECALL_FAKE_MODE:-ok} == down ]]; then
+    jq -cn --argjson id "$id" '{id:$id,error:"Search service unavailable; start recall-for-omarchy.service",kind:"unavailable"}'
+    continue
+  fi
+  case $op in
+    status)
+      jq -cn --argjson id "$id" --argjson paused "$paused" --argjson config "$config" \
+        '{id:$id,line:"1204 files indexed",activity:"idle",searchable:1204,roots:$config.roots,code_roots:$config.code_roots,paused:$paused,download:"ready"}' ;;
+    config) jq -cn --argjson id "$id" --argjson config "$config" '{id:$id,config:$config}' ;;
+    configure)
+      config=$(jq -c --argjson config "$config" '$config + .config' <<<"$line")
+      jq -cn --argjson id "$id" --argjson config "$config" '{id:$id,ok:true,config:$config}' ;;
+    pause)
+      paused=$(jq -c '.paused' <<<"$line")
+      jq -cn --argjson id "$id" '{id:$id,ok:true}' ;;
+    search)
+      case $(jq -r '.query' <<<"$line") in
+        one) found=$(jq -c '.[0:1]' <<<"$hits") ;;
+        none) found='[]' ;;
+        *) found=$(jq -c . <<<"$hits") ;;
+      esac
+      jq -cn --argjson id "$id" --argjson hits "$found" '{id:$id,hits:$hits,meaning:true,code:false}' ;;
+    *) jq -cn --argjson id "$id" '{id:$id,ok:true}' ;;
+  esac
+done

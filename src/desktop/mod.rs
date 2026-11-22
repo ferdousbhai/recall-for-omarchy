@@ -167,9 +167,38 @@ pub(super) fn checked(command: &mut Command) -> Result<()> {
     }
     Ok(())
 }
+/// Why a command failed, as a word that stays the same from release to release, so a script or an agent can act on it
+/// without matching the message. It is printed as `kind` in the error object on stderr:
+/// - `usage`: the arguments were wrong; nothing was contacted or changed.
+/// - `unavailable`: the search service isn't running (start recall-for-omarchy.service).
+/// - `service`: the service answered, and its answer was an error.
+/// - `failed`: anything else (a file, a command or the network).
+#[derive(Debug)]
+pub struct Failure {
+    pub kind: &'static str,
+    pub message: String,
+}
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+impl std::error::Error for Failure {}
+fn failure(kind: &'static str, message: impl Into<String>) -> anyhow::Error {
+    Failure { kind, message: message.into() }.into()
+}
+/// An argument error.
+fn usage(message: impl Into<String>) -> anyhow::Error {
+    failure("usage", message)
+}
+const UNAVAILABLE: &str = "Search service unavailable; start recall-for-omarchy.service";
+fn connect() -> Result<UnixStream> {
+    UnixStream::connect(socket_path()).map_err(|_| failure("unavailable", UNAVAILABLE))
+}
 pub(super) fn request(value: &Value) -> Result<Value> {
-    let mut socket = UnixStream::connect(socket_path())
-        .context("Search service unavailable; start recall-for-omarchy.service")?;
+    exchange(connect()?, value)
+}
+fn exchange(mut socket: UnixStream, value: &Value) -> Result<Value> {
     socket.set_read_timeout(Some(Duration::from_secs(115)))?;
     socket.set_write_timeout(Some(Duration::from_secs(5)))?;
     writeln!(socket, "{value}")?;
@@ -185,15 +214,23 @@ pub(super) fn read_json(reader: &mut impl BufRead, limit: usize) -> Result<Value
     }
     Ok(serde_json::from_slice(&line)?)
 }
-fn output(reply: Value) -> i32 {
-    println!("{reply}");
-    if reply.get("error").is_some() {
-        1
-    } else {
-        0
-    }
+/// Omarchy's command contract: stdout carries only what succeeded, and a failure is one JSON object on stderr,
+/// `{"error": message, "kind": kind}`, with exit status 1. The object is what the output format calls for (JSON by
+/// default), and a person at a terminal still reads the message in it.
+pub fn report(error: &anyhow::Error) -> i32 {
+    let kind = error.chain().find_map(|cause| cause.downcast_ref::<Failure>()).map_or("failed", |failure| failure.kind);
+    eprintln!("{}", json!({"error": format!("{error:#}"), "kind": kind}));
+    1
 }
-const HELP: &str = "recall — local semantic search for files and code (JSON output)\n\nCommands:\n  search QUERY [--code] [--kind KIND] [--limit 1..100] [--keyword-only]\n  text SEGMENT_ID [--code]\n  status | doctor | pause | resume\n  capabilities                        shared API and model revision\n  rank COLLECTION QUERY               rank JSON records from stdin (32 MiB maximum)\n  forget COLLECTION                   delete that collection’s cached vectors\n  models [download]                   pinned model manifest with local paths; download the files now\n  settings | toggle\n  config [set KEY JSON_VALUE]\n  skill [install]\n  setup [--skip-ocr]\n  ocr                                 system OCR languages and availability\n\nExit codes: 0 success (including no matches), 1 runtime error, 2 invalid arguments.\nSearch requires recall-for-omarchy.service. Settings opens the native Omarchy panel.";
+/// Print a reply from the service: on stdout when it succeeded, as the error object on stderr when it says `error`.
+fn output(reply: Value) -> Result<i32> {
+    if let Some(error) = reply.get("error") {
+        return Err(failure("service", error.as_str().map(String::from).unwrap_or_else(|| error.to_string())));
+    }
+    println!("{reply}");
+    Ok(0)
+}
+const HELP: &str = "recall — local semantic search for files and code (JSON output)\n\nCommands:\n  search QUERY [--code] [--kind KIND] [--limit 1..100] [--keyword-only]\n  text SEGMENT_ID [--code]\n  status | doctor | pause | resume\n  capabilities                        shared API and model revision\n  rank COLLECTION QUERY               rank JSON records from stdin (32 MiB maximum)\n  forget COLLECTION                   delete that collection’s cached vectors\n  models [download]                   pinned model manifest with local paths; download the files now\n  settings | toggle\n  config [set KEY JSON_VALUE]\n  skill [install]\n  setup [--skip-ocr]\n  ocr                                 system OCR languages and availability\n\nExit status: 0 success (including no matches), 1 any failure. Results go to stdout; a failure is one JSON object\non stderr, {\"error\": message, \"kind\": \"usage\" | \"unavailable\" | \"service\" | \"failed\"}.\nSearch requires recall-for-omarchy.service. Settings opens the native Omarchy panel.";
 
 fn payload(args: &[String]) -> Result<Value> {
     let command = args.first().map(String::as_str).unwrap_or("");
@@ -297,20 +334,26 @@ pub fn run(args: Vec<String>) -> Result<i32> {
                         if input.fill_buf()?.is_empty() {
                             break;
                         }
-                        println!("{}", json!({"error":e.to_string()}));
+                        println!("{}", json!({"error":e.to_string(),"kind":"usage"}));
                         continue;
                     }
                 };
                 let id = value.get("id").cloned().unwrap_or(Value::Null);
-                let reply =
-                    request(&value).unwrap_or_else(|e| json!({"id":id,"error":e.to_string()}));
+                // The client is a stream: it keeps running when one request fails, so each failure is the reply to that
+                // request, on stdout with the others, and carries the same `kind` words as the command line. The panel
+                // tells a service that isn't running (it says so and waits) from a request that failed.
+                let reply = match connect() {
+                    Ok(socket) => exchange(socket, &value)
+                        .unwrap_or_else(|e| json!({"id":id,"error":e.to_string(),"kind":"failed"})),
+                    Err(e) => json!({"id":id,"error":e.to_string(),"kind":"unavailable"}),
+                };
                 println!("{reply}");
                 std::io::stdout().flush()?;
             }
             Ok(0)
         }
         "capabilities" if args.len() == 1 => {
-            Ok(output(request(&json!({"api":1,"op":"capabilities"}))?))
+            output(request(&json!({"api":1,"op":"capabilities"}))?)
         }
         "rank" if args.len() == 3 => {
             let mut bytes = Vec::new();
@@ -331,7 +374,7 @@ pub fn run(args: Vec<String>) -> Result<i32> {
                     &json!({"api":1,"op":"records.search","collection":args[1],"query":args[2],"records":batch,"limit":32}),
                 )?;
                 if reply.get("error").is_some() {
-                    return Ok(output(reply));
+                    return output(reply);
                 }
                 hits.extend(
                     reply["hits"]
@@ -348,18 +391,18 @@ pub fn run(args: Vec<String>) -> Result<i32> {
                     .total_cmp(&a["score"].as_f64().unwrap_or(0.0))
             });
             hits.truncate(100);
-            Ok(output(json!({"api":1,"meaning":true,"hits":hits})))
+            output(json!({"api":1,"meaning":true,"hits":hits}))
         }
-        "forget" if args.len() == 2 => Ok(output(request(
+        "forget" if args.len() == 2 => output(request(
             &json!({"api":1,"op":"records.forget","collection":args[1]}),
-        )?)),
+        )?),
         "models" if args.len() == 1 => {
             let config = load_config()?;
             let folder = Path::new(config["models_directory"].as_str().unwrap());
-            Ok(output(json!(model_files::ALL
+            output(json!(model_files::ALL
                 .iter()
                 .map(|f| json!({"name":f.name,"bytes":f.bytes,"sha256":f.sha256,"url":f.url(),"path":folder.join(f.name)}))
-                .collect::<Vec<_>>())))
+                .collect::<Vec<_>>()))
         }
         "models" if args[1..] == ["download"] => {
             if std::env::var("RECALL_OFFLINE").as_deref() == Ok("1") {
@@ -374,23 +417,23 @@ pub fn run(args: Vec<String>) -> Result<i32> {
                 eprintln!("Downloading {} ({} MB)", file.name, file.bytes / 1_000_000);
                 model_files::install(folder, &file)?;
             }
-            Ok(output(json!({"models_directory":folder})))
+            output(json!({"models_directory":folder}))
         }
         "doctor" if args.len() == 1 => {
             let result = Command::new(engine()?).arg("devices").output()?;
             if !result.status.success() {
                 bail!("{}", String::from_utf8_lossy(&result.stderr));
             }
-            Ok(output(serde_json::from_slice(&result.stdout)?))
+            output(serde_json::from_slice(&result.stdout)?)
         }
         "skill" => {
             if args.len() == 1 {
                 print!("{SKILL}");
                 Ok(0)
             } else if args == ["skill", "install"] {
-                Ok(output(install::skill()?))
+                output(install::skill()?)
             } else {
-                Ok(output(json!({"error":"Usage: recall skill [install]"})).max(2))
+                Err(usage("Usage: recall skill [install]"))
             }
         }
         "setup" if args.len() == 1 || args == ["setup", "--skip-ocr"] => {
@@ -415,7 +458,7 @@ pub fn run(args: Vec<String>) -> Result<i32> {
             if languages.is_empty() {
                 bail!("No OCR languages installed; install tesseract-data-eng through Omarchy");
             }
-            Ok(output(json!({"engine":"tesseract", "languages":languages})))
+            output(json!({"engine":"tesseract", "languages":languages}))
         }
         "settings" | "toggle" if args.len() == 1 => {
             toggle(command == "settings")?;
@@ -423,32 +466,26 @@ pub fn run(args: Vec<String>) -> Result<i32> {
         }
         "config" => {
             if args.len() == 1 {
-                return Ok(output(load_config()?));
+                return output(load_config()?);
             }
             if args.len() != 4
                 || args[1] != "set"
                 || !defaults().as_object().unwrap().contains_key(&args[2])
             {
-                return Ok(
-                    output(json!({"error":"Usage: recall config set KEY JSON_VALUE"})).max(2),
-                );
+                return Err(usage("Usage: recall config set KEY JSON_VALUE"));
             }
             let mut config = load_config()?;
             let value = match serde_json::from_str(&args[3]) {
                 Ok(value) => value,
-                Err(error) => {
-                    println!("{}", json!({"error":error.to_string()}));
-                    return Ok(2);
-                }
+                Err(error) => return Err(usage(error.to_string())),
             };
             config[&args[2]] = value;
             settle_models(&mut config);
             if let Err(error) = validate_config(&config) {
-                println!("{}", json!({"error":error.to_string()}));
-                return Ok(2);
+                return Err(usage(error.to_string()));
             }
             save_config(&config)?;
-            Ok(output(config))
+            output(config)
         }
         _ => {
             match payload(&args) {
@@ -459,12 +496,9 @@ pub fn run(args: Vec<String>) -> Result<i32> {
                     {
                         reply["warning"]=json!(format!("Semantic encoding failed; results may contain only keyword matches: {}",reply["encoder_error"]));
                     }
-                    Ok(output(reply))
+                    output(reply)
                 }
-                Err(e) => {
-                    println!("{}", json!({"error":e.to_string()}));
-                    Ok(2)
-                }
+                Err(e) => Err(usage(e.to_string())),
             }
         }
     }

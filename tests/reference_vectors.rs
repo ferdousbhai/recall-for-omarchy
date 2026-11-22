@@ -5,8 +5,9 @@
 //!
 //! The inputs go in as the indexer hands them over: texts with the app's prompts, a screenshot as PNG (280 tokens), a
 //! photo as JPEG (140, and 70 as a video frame) and a 16 kHz WAV, all read by llama.cpp's own decoders. Needs the
-//! model files; skipped without them.
+//! model files; without them the test says it was skipped (or fails, with `RECALL_REQUIRE_MODELS=1`).
 
+mod common;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -67,9 +68,14 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 
 #[test]
 fn vectors_match_the_reference() {
-    let Ok(models) = LlamaModels::locate() else { return eprintln!("skipped: no model files") };
+    // The model files are 865 MB and CI does not download them, so without them this is skipped, in plain sight.
+    // RECALL_REQUIRE_MODELS=1 turns the skip into a failure, for a release check that must have compared the vectors.
+    let required = std::env::var("RECALL_REQUIRE_MODELS").as_deref() == Ok("1");
+    let Ok(models) = LlamaModels::locate() else {
+        return common::skip("vectors_match_the_reference", "the EmbeddingGemma text model", required);
+    };
     if models.media.is_none() {
-        return eprintln!("skipped: no media model");
+        return common::skip("vectors_match_the_reference", "the EmbeddingGemma image/audio encoder", required);
     }
     let made = vectors(&models);
     let path = folder().join("vectors.json");

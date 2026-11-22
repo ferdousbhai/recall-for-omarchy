@@ -1,12 +1,12 @@
 use super::*;
 use std::io;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixListener;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, ChildStdin, ChildStdout};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Instant;
 
@@ -63,7 +63,40 @@ struct State {
     sync: AtomicBool,
     paused: AtomicBool,
     connections: AtomicUsize,
+    /// Ends the background loop's sleep when another thread has work for it.
+    wake: Wake,
+    /// Set when the settings may read differently although the file did not change (the default model folder moved).
+    reload: AtomicBool,
+    /// Ends the model thread's wait: the settings changed, a caller needs a model, or someone asked for the status.
+    models_wake: (Mutex<bool>, Condvar),
 }
+/// An eventfd the background loop polls with its other descriptors. Flags alone would only be seen at the next
+/// timeout, and that is minutes away when nothing else happens.
+struct Wake(Option<OwnedFd>);
+impl Wake {
+    fn new() -> Self {
+        let fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
+        Self((fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(fd) }))
+    }
+    fn fd(&self) -> Option<RawFd> {
+        self.0.as_ref().map(AsRawFd::as_raw_fd)
+    }
+    fn notify(&self) {
+        if let Some(fd) = self.fd() {
+            let one = 1u64;
+            unsafe { libc::write(fd, (&one as *const u64).cast(), 8) };
+        }
+    }
+    /// Reading resets the counter, so one wake answers any number of notifications.
+    fn drain(&self) {
+        if let Some(fd) = self.fd() {
+            let mut count = 0u64;
+            unsafe { libc::read(fd, (&mut count as *mut u64).cast(), 8) };
+        }
+    }
+}
+/// How long the loop sleeps without an eventfd (the kernel refused one): flags are then found by looking.
+const WITHOUT_WAKE: Duration = Duration::from_secs(1);
 fn launch(config: &Value, command: &str) -> Result<Command> {
     let mut cmd = Command::new(engine()?);
     cmd.env("RECALL_SHARED_SOCKET", socket_path());
@@ -102,6 +135,27 @@ fn launch(config: &Value, command: &str) -> Result<Command> {
     Ok(cmd)
 }
 impl State {
+    /// Ask the background loop to sync the folders now.
+    fn request_sync(&self) {
+        self.sync.store(true, Ordering::Release);
+        self.wake.notify();
+    }
+    /// Ask the background loop to read the settings again now.
+    fn request_reload(&self) {
+        self.reload.store(true, Ordering::Release);
+        self.wake.notify();
+    }
+    fn wake_models(&self) {
+        *self.models_wake.0.lock().unwrap() = true;
+        self.models_wake.1.notify_all();
+    }
+    /// The model thread's wait between looks at the model folder: until it is woken, or the timeout as a safety net
+    /// for files that appear or vanish without anyone telling it.
+    fn wait_models(&self, timeout: Duration) {
+        let (lock, wake) = &self.models_wake;
+        let (mut woken, _) = wake.wait_timeout_while(lock.lock().unwrap(), timeout, |woken| !*woken).unwrap();
+        *woken = false;
+    }
     fn engine_request(&self, value: &Value) -> Result<Value> {
         let (tx, rx) = mpsc::channel();
         self.rpc_tx
@@ -169,11 +223,15 @@ impl State {
                         });
                     self.model_requests
                         .fetch_or(if media { 3 } else { 1 }, Ordering::Release);
+                    self.wake_models();
                 }
                 result
             }
 
             "status" => {
+                // Someone is looking, so the download state is brought up to date for the next look; nothing checks
+                // the model folder on a timer otherwise.
+                self.wake_models();
                 let mut s = self.status.lock().unwrap().clone();
                 let config = self.config.lock().unwrap();
                 s["roots"] = config["roots"].clone();
@@ -224,11 +282,13 @@ impl State {
                 self.paused.store(paused, Ordering::Release);
                 if paused {
                     if let Some(h) = self.helper.lock().unwrap().as_mut() {
-                        writeln!(h.input, "stop")?;
+                        // An indexer that already finished and exited by itself has nothing to stop, and its closed
+                        // pipe must not turn the pause into an error.
+                        let _ = writeln!(h.input, "stop");
                         h.stopping = true;
                     }
                 } else {
-                    self.sync.store(true, Ordering::Release);
+                    self.request_sync();
                 }
                 Ok(json!({"ok":true}))
             }
@@ -348,27 +408,28 @@ impl State {
             _ => bail!("Unknown operation: {op}"),
         }
     }
-    fn start_helper(self: &Arc<Self>, backfill: bool) -> Result<()> {
+    /// Start the indexer or tell the running one to sync. False when a paused indexer is still shutting down: there
+    /// is no event for its exit, so the caller tries again shortly.
+    fn start_helper(self: &Arc<Self>, backfill: bool) -> Result<bool> {
         // Nothing is embedded with model files that haven't been checked; preparing asks for a sync when it's done.
         if !self.models_prepared.load(Ordering::Acquire) {
-            return Ok(());
+            return Ok(true);
         }
         let config = self.config.lock().unwrap().clone();
         if self.paused.load(Ordering::Acquire)
             || (folders(&config, "roots").is_empty() && folders(&config, "code_roots").is_empty())
         {
-            return Ok(());
+            return Ok(true);
         }
         let mut holder = self.helper.lock().unwrap();
         if let Some(h) = holder.as_mut() {
             if h.child.try_wait()?.is_none() {
                 if h.stopping {
-                    self.sync.store(true, Ordering::Release);
-                    return Ok(());
+                    return Ok(false);
                 }
                 writeln!(h.input, "sync")?;
                 writeln!(h.input, "sync code")?;
-                return Ok(());
+                return Ok(true);
             }
         }
         *holder = None;
@@ -433,8 +494,24 @@ impl State {
                 });
             }
         });
-        Ok(())
+        Ok(true)
     }
+}
+/// The power-profiles daemon under its current name and the one it had before.
+const PROFILE_SERVICES: [(&str, &str); 2] = [
+    ("org.freedesktop.UPower.PowerProfiles", "/org/freedesktop/UPower/PowerProfiles"),
+    ("net.hadess.PowerProfiles", "/net/hadess/PowerProfiles"),
+];
+/// The first profile service that answers, and whether it is saving power.
+fn power_profile() -> Option<(usize, bool)> {
+    PROFILE_SERVICES.iter().enumerate().find_map(|(index, (service, path))| {
+        Command::new("busctl")
+            .args(["--system", "--timeout=1s", "get-property", service, path, service, "ActiveProfile"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| (index, String::from_utf8_lossy(&output.stdout).contains("\"power-saver\"")))
+    })
 }
 fn backfill_allowed(config: &Value) -> bool {
     let battery = fs::read_dir("/sys/class/power_supply")
@@ -448,32 +525,138 @@ fn backfill_allowed(config: &Value) -> bool {
     if battery && config["index_on_battery"] == false {
         return false;
     }
-    let saver = [
-        (
-            "org.freedesktop.UPower.PowerProfiles",
-            "/org/freedesktop/UPower/PowerProfiles",
-        ),
-        ("net.hadess.PowerProfiles", "/net/hadess/PowerProfiles"),
-    ]
-    .iter()
-    .find_map(|(service, path)| {
-        Command::new("busctl")
-            .args([
-                "--system",
-                "--timeout=1s",
-                "get-property",
-                service,
-                path,
-                service,
-                "ActiveProfile",
-            ])
-            .output()
-            .ok()
-            .filter(|output| output.status.success())
-            .map(|output| String::from_utf8_lossy(&output.stdout).contains("\"power-saver\""))
-    })
-    .unwrap_or(false);
-    !saver
+    !power_profile().is_some_and(|(_, saver)| saver)
+}
+/// True for a kernel uevent about a power supply (a charger plugged in or pulled, a battery changing state). The
+/// message is the action line followed by NUL-separated KEY=value fields.
+fn power_supply_event(message: &[u8]) -> bool {
+    message.split(|&b| b == 0).any(|field| field == b"SUBSYSTEM=power_supply")
+}
+/// What tells the background loop that the power policy may have changed, so it need not look on a timer: the
+/// kernel's uevents for the battery and charger, and the profile daemon's D-Bus signals for power-saver.
+struct PowerEvents {
+    /// A NETLINK_KOBJECT_UEVENT socket. It needs no privilege, but a sandbox may refuse it.
+    uevents: Option<OwnedFd>,
+    /// `gdbus monitor` on the profile service; each signal is a line on its output.
+    profile: Option<Child>,
+}
+impl PowerEvents {
+    /// The safety re-check with both event sources, in case an event was lost (the uevent queue can overflow).
+    const SAFETY: Duration = Duration::from_secs(300);
+    /// The re-check when a source is missing. Still far from the 10 seconds this used to be: the policy only decides
+    /// whether a long backfill may run.
+    const WITHOUT_EVENTS: Duration = Duration::from_secs(60);
+    fn new() -> Self {
+        Self { uevents: Self::uevent_socket(), profile: Self::profile_monitor() }
+    }
+    fn uevent_socket() -> Option<OwnedFd> {
+        let fd = unsafe {
+            libc::socket(
+                libc::AF_NETLINK,
+                libc::SOCK_RAW | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+                libc::NETLINK_KOBJECT_UEVENT,
+            )
+        };
+        if fd < 0 {
+            return None;
+        }
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        let mut address: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
+        address.nl_family = libc::AF_NETLINK as libc::sa_family_t;
+        // Group 1 is the kernel's own broadcast; udev's rebroadcast (group 2) would say the same again.
+        address.nl_groups = 1;
+        let bound = unsafe {
+            libc::bind(
+                fd.as_raw_fd(),
+                (&address as *const libc::sockaddr_nl).cast(),
+                std::mem::size_of::<libc::sockaddr_nl>() as libc::socklen_t,
+            )
+        };
+        (bound == 0).then_some(fd)
+    }
+    fn profile_monitor() -> Option<Child> {
+        let (service, path) = PROFILE_SERVICES[power_profile()?.0];
+        let mut command = Command::new("gdbus");
+        command
+            .args(["monitor", "--system", "--dest", service, "--object-path", path])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        // The loop's thread lives as long as the daemon, so the parent-death signal means the daemon died.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let child = command.spawn().ok()?;
+        let fd = child.stdout.as_ref()?.as_raw_fd();
+        // Drained without blocking, after poll says there is something.
+        unsafe { libc::fcntl(fd, libc::F_SETFL, libc::fcntl(fd, libc::F_GETFL) | libc::O_NONBLOCK) };
+        Some(child)
+    }
+    fn fds(&self) -> [Option<RawFd>; 2] {
+        [
+            self.uevents.as_ref().map(AsRawFd::as_raw_fd),
+            self.profile.as_ref().and_then(|child| child.stdout.as_ref()).map(AsRawFd::as_raw_fd),
+        ]
+    }
+    fn interval(&self) -> Duration {
+        if self.uevents.is_some() && self.profile.is_some() {
+            Self::SAFETY
+        } else {
+            Self::WITHOUT_EVENTS
+        }
+    }
+    /// Read what arrived; true when the power policy should be looked at again.
+    fn changed(&mut self) -> bool {
+        let mut changed = false;
+        let mut buffer = [0u8; 8192];
+        if let Some(fd) = &self.uevents {
+            loop {
+                let size = unsafe { libc::recv(fd.as_raw_fd(), buffer.as_mut_ptr().cast(), buffer.len(), 0) };
+                if size > 0 {
+                    // Every device's events arrive here (they are rare); only a power supply's matter.
+                    changed |= power_supply_event(&buffer[..size as usize]);
+                } else if size < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ENOBUFS) {
+                    // The queue overflowed and dropped events, perhaps the one that mattered.
+                    changed = true;
+                } else {
+                    break;
+                }
+            }
+        }
+        let mut ended = false;
+        if let Some(fd) = self.fds()[1] {
+            loop {
+                let size = unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), buffer.len()) };
+                if size > 0 {
+                    changed = true;
+                } else {
+                    // End of file: the monitor exited (no system bus, or it was killed).
+                    ended = size == 0;
+                    break;
+                }
+            }
+        }
+        if ended {
+            if let Some(mut child) = self.profile.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+        changed
+    }
+}
+impl Drop for PowerEvents {
+    fn drop(&mut self) {
+        if let Some(child) = &mut self.profile {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 }
 /// Check the model folder whenever it changes (moving an earlier install's files in on the way), then download what's
 /// wanted and missing. A check and a move need no network, so they also run offline.
@@ -488,22 +671,27 @@ fn maintain_models(state: Arc<State>, offline: bool) {
                 if let Err(e) = model_files::prepare(&folder) {
                     eprintln!("Models: {e}");
                 }
-                // Moving the files moves the folder; the settings poll tells the workers within a second.
+                // Moving the files moves the default folder without the settings file changing, so the background loop
+                // is told to read the settings again; it tells the workers and wakes this thread with the result.
                 prepared = Some(model_files::resolve_setting(saved));
                 state.models_prepared.store(true, Ordering::Release);
-                state.sync.store(true, Ordering::Release);
+                state.request_reload();
+                state.request_sync();
                 continue;
             }
             if offline {
                 state.status.lock().unwrap()["download"] =
                     json!(if model_files::missing(&folder).is_empty() { "ready" } else { "offline" });
-                thread::sleep(Duration::from_secs(5));
+                state.wait_models(MODELS_SAFETY);
             } else {
                 download_missing(&state, &config, &folder);
             }
         }
     });
 }
+/// How long the model thread waits when nothing tells it to look: new settings, a caller needing a model and a status
+/// request all wake it at once, so this only covers model files changed by hand while nobody is looking.
+const MODELS_SAFETY: Duration = Duration::from_secs(300);
 fn download_missing(state: &State, config: &Value, folder: &Path) {
     let wanted = if !folders(config, "roots").is_empty()
         || !folders(config, "code_roots").is_empty()
@@ -530,7 +718,7 @@ fn download_missing(state: &State, config: &Value, folder: &Path) {
             } else {
                 "ready"
             });
-        thread::sleep(Duration::from_secs(5));
+        state.wait_models(MODELS_SAFETY);
         return;
     }
     state.status.lock().unwrap()["download"] = json!("downloading");
@@ -538,7 +726,7 @@ fn download_missing(state: &State, config: &Value, folder: &Path) {
     match result {
         Ok(()) => {
             state.status.lock().unwrap()["download"] = json!("ready");
-            state.sync.store(true, Ordering::Release);
+            state.request_sync();
         }
         Err(e) => {
             let mut s = state.status.lock().unwrap();
@@ -546,6 +734,7 @@ fn download_missing(state: &State, config: &Value, folder: &Path) {
             s["line"] = json!(format!("Model download: {e}"));
         }
     }
+    // A pause between attempts, so a failing download is not retried in a tight loop; nothing should cut it short.
     thread::sleep(Duration::from_secs(30));
 }
 pub(super) fn run() -> Result<i32> {
@@ -594,6 +783,9 @@ pub(super) fn run() -> Result<i32> {
         sync: AtomicBool::new(true),
         paused: AtomicBool::new(false),
         connections: AtomicUsize::new(0),
+        wake: Wake::new(),
+        reload: AtomicBool::new(false),
+        models_wake: (Mutex::new(false), Condvar::new()),
     });
     let owner = Arc::clone(&state);
     thread::spawn(move || {
@@ -614,11 +806,21 @@ pub(super) fn run() -> Result<i32> {
     thread::spawn(move || {
         let mut config = config;
         let mut watcher = watcher::Watcher::new(&config);
+        let mut settings = watcher::FileWatch::new(&config_path());
+        let mut power = PowerEvents::new();
         let mut policy = backfill_allowed(&config);
         let mut config_check = Instant::now();
         let mut power_check = Instant::now();
+        let mut power_due = false;
+        // When to ask the indexer again after it could not take a sync.
+        let mut retry: Option<Instant> = None;
+        // Each pass does what is due and then sleeps until an event or the nearest deadline. A request made while a
+        // pass runs is not lost: its wake stays readable, so the sleep ends at once.
         loop {
-            if config_check.elapsed() >= Duration::from_secs(1) {
+            // The settings are read again when their file changes. The slow re-read is a safety net for a missed
+            // event (a queue overflow, a filesystem without inotify), on the same schedule as the folder rescan.
+            let reload = settings.changed() | background.reload.swap(false, Ordering::AcqRel);
+            if reload || config_check.elapsed() >= watcher::RECOVERY {
                 config_check = Instant::now();
                 match load_config() {
                     Ok(new) if new != config => {
@@ -630,11 +832,15 @@ pub(super) fn run() -> Result<i32> {
                         *helper = None;
                         drop(helper);
                         *background.rpc.lock().unwrap() = None;
+                        // The battery setting is half of the power policy.
+                        power_due |= new["index_on_battery"] != config["index_on_battery"];
                         config = new;
                         *background.config.lock().unwrap() = config.clone();
                         let _ = fs::create_dir_all(config["index_directory"].as_str().unwrap());
                         watcher = watcher::Watcher::new(&config);
                         background.sync.store(true, Ordering::Release);
+                        // The model thread follows the folders and the model folder.
+                        background.wake_models();
                     }
                     Err(e) => {
                         eprintln!("Settings: {e}");
@@ -642,7 +848,7 @@ pub(super) fn run() -> Result<i32> {
                     _ => (),
                 }
             }
-            if power_check.elapsed() >= Duration::from_secs(10) {
+            if power.changed() | std::mem::take(&mut power_due) || power_check.elapsed() >= power.interval() {
                 power_check = Instant::now();
                 let next = backfill_allowed(&config);
                 if next != policy {
@@ -655,13 +861,34 @@ pub(super) fn run() -> Result<i32> {
             if watcher.tick(&config) {
                 background.sync.store(true, Ordering::Release);
             }
-            if background.sync.swap(false, Ordering::AcqRel) {
-                if let Err(e) = background.start_helper(policy) {
-                    eprintln!("Indexer: {e}");
-                    background.sync.store(true, Ordering::Release);
-                }
+            if retry.is_some_and(|at| at <= Instant::now()) {
+                retry = None;
+                background.sync.store(true, Ordering::Release);
             }
-            thread::sleep(Duration::from_millis(250));
+            if background.sync.swap(false, Ordering::AcqRel) {
+                retry = match background.start_helper(policy) {
+                    Ok(true) => None,
+                    // A paused indexer is still exiting; it is gone within moments.
+                    Ok(false) => Some(Instant::now() + Duration::from_millis(250)),
+                    Err(e) => {
+                        eprintln!("Indexer: {e}");
+                        Some(Instant::now() + Duration::from_secs(1))
+                    }
+                };
+            }
+            let mut deadline = watcher
+                .next_deadline()
+                .min(config_check + watcher::RECOVERY)
+                .min(power_check + power.interval());
+            if let Some(at) = retry {
+                deadline = deadline.min(at);
+            }
+            if background.wake.fd().is_none() {
+                deadline = deadline.min(Instant::now() + WITHOUT_WAKE);
+            }
+            let [uevents, profile] = power.fds();
+            watcher::wait(&[background.wake.fd(), watcher.fd(), settings.fd(), uevents, profile], deadline);
+            background.wake.drain();
         }
     });
     for connection in listener.incoming() {
@@ -694,4 +921,63 @@ pub(super) fn run() -> Result<i32> {
     }
     drop(lock);
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn a_wake_ends_the_sleep_at_once_and_is_spent_by_draining() {
+        let wake = Wake::new();
+        let started = Instant::now();
+        watcher::wait(&[wake.fd()], started + Duration::from_millis(50));
+        assert!(started.elapsed() >= Duration::from_millis(50), "nothing was asked, so it sleeps to the deadline");
+        // Asked twice before the sleep, as two request threads might: one wake answers both.
+        wake.notify();
+        wake.notify();
+        let started = Instant::now();
+        watcher::wait(&[wake.fd()], started + Duration::from_secs(30));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        wake.drain();
+        let started = Instant::now();
+        watcher::wait(&[wake.fd()], started + Duration::from_millis(50));
+        assert!(started.elapsed() >= Duration::from_millis(50));
+    }
+    #[test]
+    fn a_wake_from_another_thread_ends_a_sleep_already_under_way() {
+        let wake = Arc::new(Wake::new());
+        let other = Arc::clone(&wake);
+        let started = Instant::now();
+        let waker = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            other.notify();
+        });
+        watcher::wait(&[wake.fd()], started + Duration::from_secs(30));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        waker.join().unwrap();
+    }
+    #[test]
+    fn only_power_supply_uevents_count() {
+        assert!(power_supply_event(
+            b"change@/devices/platform/battery/power_supply/BAT0\0ACTION=change\0SUBSYSTEM=power_supply\0POWER_SUPPLY_STATUS=Discharging\0"
+        ));
+        assert!(!power_supply_event(b"add@/devices/usb1/1-1\0ACTION=add\0SUBSYSTEM=usb\0"));
+        assert!(!power_supply_event(b"change@/x\0ACTION=change\0NOTE=SUBSYSTEM=power_supply_like\0"));
+    }
+    #[test]
+    fn the_power_recheck_is_slow_with_events_and_never_fast_without() {
+        let mut power = PowerEvents { uevents: None, profile: None };
+        assert_eq!(power.interval(), PowerEvents::WITHOUT_EVENTS);
+        assert!(PowerEvents::WITHOUT_EVENTS >= Duration::from_secs(60));
+        assert!(PowerEvents::SAFETY >= PowerEvents::WITHOUT_EVENTS);
+        assert!(!power.changed());
+        // A monitor that exits (no system bus) is dropped, and the loop goes on by the slow re-check.
+        let mut child = Command::new("true").stdin(Stdio::null()).stdout(Stdio::piped()).spawn().unwrap();
+        let fd = child.stdout.as_ref().unwrap().as_raw_fd();
+        child.wait().unwrap();
+        power.profile = Some(child);
+        watcher::wait(&[Some(fd)], Instant::now() + Duration::from_secs(5));
+        assert!(!power.changed());
+        assert!(power.profile.is_none());
+    }
 }

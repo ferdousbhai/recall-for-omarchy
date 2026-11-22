@@ -1,6 +1,7 @@
 //! Crawls over chosen and skipped folders, estimates by subfolder, keyword search over Bengali and Arabic text, and
 //! poppler reading PDFs.
 
+mod common;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -157,8 +158,9 @@ fn two_page_pdf() -> Vec<u8> {
 
 #[test]
 fn poppler_reads_pages_and_title() {
+    // Poppler is a dependency of the package and CI installs it, so there its absence fails the test.
     if tools::path("pdftotext").is_none() {
-        return eprintln!("skipped: no poppler");
+        return common::skip("poppler_reads_pages_and_title", "poppler (pdftotext)", common::in_ci());
     }
     let (_dir, base) = folder();
     let path = base.join("two.pdf");

@@ -3,10 +3,8 @@ mod desktop;
 fn main() {
     let code = match desktop::run(std::env::args().skip(1).collect()) {
         Ok(code) => code,
-        Err(error) => {
-            println!("{}", serde_json::json!({"error": error.to_string()}));
-            1
-        }
+        // Every failure leaves through here: one JSON object on stderr, exit status 1.
+        Err(error) => desktop::report(&error),
     };
     std::process::exit(code);
 }

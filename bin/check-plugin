@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+# The search panel's checks (omarchy/plugin): the manifest against the shell's own validator, qmllint on every QML
+# file, and the scenes in tests/plugin/shell.qml, which load the real panel offscreen in Quickshell and drive it with
+# key events against tests/plugin/fake-client. No daemon, index, model or display is needed, and the running shell
+# and the installed copy of the plugin are never touched.
+#
+#   bin/check-plugin                                  every check
+#   bin/check-plugin --look DIR [--theme NAME|DIR] [--language CODE] [--plugin DIR]
+#                                                     pictures of the panel's views, for looking at layout
+#
+# Needs an Omarchy shell (OMARCHY_PATH, default /usr/share/omarchy; a checkout of omacom/omarchy works), quickshell,
+# qmllint (qt6-declarative) and jq. What the catalog must list is checked by `cargo test --test plugin_catalog`.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+plugin=$PWD/omarchy/plugin
+look="" theme="" language=en
+while (( $# )); do
+  case $1 in
+    --look) look=$2; shift 2 ;;
+    --theme) theme=$2; shift 2 ;;
+    --language) language=$2; shift 2 ;;
+    --plugin) plugin=$(realpath "$2"); shift 2 ;;
+    *) echo "Usage: bin/check-plugin [--look DIR [--theme NAME|DIR] [--language CODE] [--plugin DIR]]" >&2; exit 1 ;;
+  esac
+done
+
+omarchy=${OMARCHY_PATH:-/usr/share/omarchy}
+[[ -f $omarchy/shell/Commons/Translations.qml ]] || {
+  echo "bin/check-plugin: no Omarchy shell with plugin translations in $omarchy; set OMARCHY_PATH to an Omarchy 4 installation or checkout." >&2
+  exit 1
+}
+qmllint=$(command -v qmllint6 || command -v qmllint || echo /usr/lib/qt6/bin/qmllint)
+for tool in "$qmllint" quickshell jq; do
+  command -v "$tool" >/dev/null || { echo "bin/check-plugin: $tool is missing (packages: qt6-declarative, quickshell, jq)." >&2; exit 1; }
+done
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+# A Quickshell configuration that is the shell's own modules plus the harness; `qs.Commons` and `qs.Ui` resolve
+# against it at run time, and against the `qs` link for qmllint.
+mkdir -p "$work/config" "$work/imports"
+for item in "$omarchy"/shell/*; do
+  [[ $(basename "$item") == shell.qml ]] || ln -s "$item" "$work/config/$(basename "$item")"
+done
+cp tests/plugin/shell.qml "$work/config/shell.qml"
+ln -s "$omarchy/shell" "$work/imports/qs"
+
+# Scenes read English, whatever language this desktop is set to.
+printf '%s\n' "$language" > "$work/language"
+home=$HOME
+if [[ -n $theme ]]; then
+  # Another theme is shown from a scratch home holding only its palette, so the user's theme stays as it is.
+  colors=""
+  for dir in "$theme" "$HOME/.config/omarchy/themes/$theme" "$omarchy/themes/$theme"; do
+    [[ -f $dir/colors.toml ]] && { colors=$dir/colors.toml; break; }
+  done
+  [[ -n $colors ]] || { echo "bin/check-plugin: no theme $theme with a colors.toml." >&2; exit 1; }
+  home=$work/home
+  mkdir -p "$home/.local/state/omarchy/current/theme" "$home/.config/omarchy"
+  cp "$colors" "$home/.local/state/omarchy/current/theme/colors.toml"
+fi
+
+failed=0
+# Runs one scene; the second argument is where to save a picture of how it ended.
+scene() {
+  local name=$1 shot=${2:-} client=${3:-$PWD/tests/plugin/fake-client} log=$work/$1.log
+  env HOME="$home" XDG_STATE_HOME="$home/.local/state" XDG_CONFIG_HOME="$home/.config" OMARCHY_PATH="$omarchy" \
+    OMARCHY_LANGUAGE_FILE="$work/language" QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software QT_QPA_PLATFORMTHEME= \
+    QT_STYLE_OVERRIDE= RECALL_PLUGIN="$plugin" RECALL_CLIENT="$client" RECALL_SCENE="$name" RECALL_SHOT="$shot" \
+    RECALL_FAKE_MODE="${RECALL_FAKE_MODE:-ok}" \
+    timeout 90 quickshell -p "$work/config" --no-color >"$log" 2>&1 </dev/null || true
+  # Anything the plugin's own files warn about counts, even when the scene's assertions pass.
+  local problems
+  problems=$(grep -E "WARN|ERROR" "$log" | grep -F "$plugin" | sed -E 's/^ *(WARN|ERROR)[^:]*: //' | sort -u || true)
+  if grep -q "HARNESS_OK $name" "$log" && [[ -z $problems ]]; then
+    echo "ok   $name${shot:+  $shot}"
+  else
+    failed=1
+    echo "FAIL $name"
+    grep -o "HARNESS_FAIL.*" "$log" || true
+    [[ -z $problems ]] || echo "$problems"
+    grep -q "HARNESS_" "$log" || tail -n 15 "$log"
+  fi
+}
+
+if [[ -n $look ]]; then
+  mkdir -p "$look"
+  look=$(realpath "$look")
+  scene look-search "$look/search.png"
+  scene look-empty "$look/empty.png"
+  scene look-settings "$look/settings.png"
+  scene look-settings-end "$look/settings-end.png"
+  scene look-discard "$look/discard.png"
+  scene look-missing "$look/missing.png" "$work/no-such-recall-client"
+  RECALL_FAKE_MODE=down scene look-down "$look/service-down.png"
+  exit $failed
+fi
+
+echo "Manifest"
+"$omarchy/bin/omarchy-plugin-validate" "$plugin" >/dev/null || { echo "FAIL the manifest"; exit 1; }
+for catalog in "$plugin"/i18n/*.json; do
+  jq -e 'type == "object"' "$catalog" >/dev/null || { echo "FAIL $catalog is not a JSON object"; exit 1; }
+done
+echo "ok   omarchy plugin validate, catalogs parse"
+
+echo "qmllint"
+# Two kinds of warning are the shell's typing, not mistakes here: the shell declares Style.font, Style.spacing and
+# Style.bar as plain QtObjects, so their tokens look undeclared, and Quickshell's PanelWindow is registered as not
+# creatable. Everything else qmllint says fails the check.
+lint=$("$qmllint" -I "$work/imports" "$plugin"/*.qml 2>&1 | awk '
+  /^(Warning|Error):/ {
+    header = $0; getline source
+    if (header ~ /not found on type "QObject"/) {
+      split(header, part, ":"); before = substr(source, 1, part[4] - 1)
+      if (before ~ /Style\.(font|spacing|bar)\.$/) next
+    }
+    if (header ~ /Type PanelWindow is not creatable/) next
+    print header; print source
+  }') || true
+if [[ -n $lint ]]; then
+  echo "$lint"
+  echo "FAIL qmllint"
+  exit 1
+fi
+echo "ok   $(ls "$plugin"/*.qml | wc -l) files"
+
+echo "Panel scenes"
+for name in search one-result no-results settings-tab settings-discard settings-discard-confirmed settings-save pause; do
+  scene "$name"
+done
+scene missing-client "" "$work/no-such-recall-client"
+RECALL_FAKE_MODE=down scene service-down
+
+(( failed == 0 )) || { echo "Plugin checks failed."; exit 1; }
+echo "Plugin checks passed."

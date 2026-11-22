@@ -147,7 +147,7 @@ check "on Omarchy it never runs pacman -Syu (Omarchy's update guard aborts it)" 
 setup
 status=0
 bash install.sh --bogus >/dev/null 2>&1 || status=$?
-check "an unknown option exits 2" [ "$status" = 2 ]
+check "an unknown option exits 1" [ "$status" = 1 ]
 check "an unknown option changes nothing" [ ! -e /etc/pacman.d/recall-for-omarchy.conf ]
 
 # ARM's update helper removes the old [omarchy] block before appending
