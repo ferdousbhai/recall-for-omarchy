@@ -456,9 +456,11 @@ fn main() {
         "index-service" => cli::index_service::serve(&args),
         "worker" => Ok(cli::worker::serve(&args)),
         "serve" => Ok(cli::serve::serve(&args)),
+        // Exit status 1 for any failure, a mistyped command included, with the help on stderr: stdout is only ever
+        // what a command produced.
         _ => {
-            println!("{}", usage());
-            Ok(2)
+            eprintln!("{}", usage());
+            Ok(1)
         }
     });
     match result {

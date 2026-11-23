@@ -115,7 +115,8 @@ add_signed_repo() {
 for arg in "$@"; do
   case $arg in
     -y|--yes) ;; # Earlier installers asked before installing packages; this one never asks.
-    *) echo "Unknown option: $arg" >&2; exit 2 ;;
+    # Omarchy's commands exit 1 on any failure, a mistyped option included.
+    *) echo "Unknown option: $arg" >&2; exit 1 ;;
   esac
 done
 if ! command -v pacman >/dev/null; then

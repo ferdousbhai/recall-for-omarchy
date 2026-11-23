@@ -1,13 +1,14 @@
 //! System OCR coverage: use the same Tesseract engine supplied by Omarchy.
 //! ocr.png is synthetic English text rendered in Liberation Sans on a plain white background.
+mod common;
 use std::path::Path;
 
 #[test]
 fn system_ocr_recovers_after_invalid_image_and_handles_path_spaces() {
-    // OCR is optional for engine-only development. Release CI installs the English language data.
+    // OCR is optional for engine-only development. CI installs Tesseract and its English data, so there its absence
+    // fails the test.
     if recall::tools::path("tesseract").is_none() {
-        eprintln!("Skipping system OCR test: Tesseract not installed");
-        return;
+        return common::skip("system_ocr_recovers_after_invalid_image_and_handles_path_spaces", "tesseract", common::in_ci());
     }
     let folder = tempfile::tempdir().unwrap();
     let invalid = folder.path().join("invalid.png");

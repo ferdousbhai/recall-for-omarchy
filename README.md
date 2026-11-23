@@ -2,6 +2,8 @@
 
 Search your files by what’s in them. A native Omarchy desktop app **with a CLI and a bundled skill, so coding agents can search your files too**.
 
+![Recall finding a contract clause, a scanned receipt and a moment in a recording from a short description of each](docs/demo.gif)
+
 Describe a photo, find a document passage, jump to a recording interval, or search source code by intent. EmbeddingGemma 2 runs locally; file content, OCR text and embeddings stay on your computer.
 
 ## Install
@@ -24,7 +26,21 @@ OCR works through the system `tesseract` executable, without Python or a separat
 
 ## Desktop and agents
 
-**Super+Ctrl+Shift+F** opens search. Arrow keys select, Enter opens at the matching page/line/media interval, and Ctrl+Enter reveals the file. Settings chooses folders; Pause stops background indexing.
+**Super+Ctrl+Shift+F** opens search. Settings chooses folders; Pause stops background indexing. The panel is driven from the keyboard, and its footer shows the shortcuts for the view you are in:
+
+| Key | Action |
+| --- | --- |
+| Super+Ctrl+Shift+F | Open or close the panel |
+| ↑ / ↓ | Select a result |
+| Enter | Open the result at the matching page, line or media interval |
+| Ctrl+Enter | Reveal the file in the file manager |
+| Ctrl+P | Pause or resume indexing |
+| Ctrl+, | Switch between search and settings |
+| Ctrl+S | Save settings |
+| Tab / Shift+Tab | Next or previous field |
+| Esc | Close the panel; with unsaved settings it asks first, and Esc again keeps editing |
+
+The panel follows the Omarchy theme, text size, window rounding and language. Its strings live in `omarchy/plugin/i18n/<code>.json`, one file per Omarchy language code; English is the only catalog so far, and a missing language falls back to it.
 
 ```bash
 recall search "payment error" --kind screenshot --limit 5
@@ -36,7 +52,7 @@ recall skill
 recall skill install
 ```
 
-The CLI and background coordinator are native Rust. The search panel and settings use QML. Python and GTK are not required at runtime. The CLI outputs JSON with meaningful exit codes. The embedded skill installs to the shared agents skill directory, with Claude Code linking when available. Searching never opens a window. The background service must be running. Only selected folders are searched; code repositories require explicit selection. Audio matches point to intervals, not word-level transcripts.
+The CLI and background coordinator are native Rust. The search panel and settings use QML. Python and GTK are not required at runtime. The CLI writes JSON results to stdout and exits 0; any failure exits 1 with one JSON object on stderr, `{"error": …, "kind": "usage" | "unavailable" | "service" | "failed"}`. The embedded skill installs to the shared agents skill directory, with Claude Code linking when available. Searching never opens a window. The background service must be running. Only selected folders are searched; code repositories require explicit selection. Audio matches point to intervals, not word-level transcripts.
 
 [Usage and development](omarchy/README.md) · [Website](https://ferdousbhai.com/recall)
 
@@ -46,7 +62,9 @@ The CLI and background coordinator are native Rust. The search panel and setting
 export PATH="$HOME/.cargo/bin:$PATH"
 scripts/build-llama.sh
 cargo build --release --locked
-bin/check                         # tests, clippy, scripts and the installer test
+bin/check                         # tests, clippy, scripts, the installer test and the panel checks
+bin/check-plugin                  # the panel alone: manifest, qmllint, and its views driven offscreen
+bin/check-plugin --look /tmp/look # pictures of each view; add --theme catppuccin-latte or --language ar
 bin/build-packages "$(uname -m)"  # the native Arch package into dist/<arch>; no Docker
 ```
 

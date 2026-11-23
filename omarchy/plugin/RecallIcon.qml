@@ -1,12 +1,21 @@
 import QtQuick
-import qs.Commons as Theme
+import qs.Commons
 
+// The panel's own line icons, drawn on a 24-unit grid and scaled to the item, so they follow the text size and take
+// any theme colour.
 Canvas {
   id: icon
   property string name: "search"
-  property color ink: Theme.Color.menu.text
-  implicitWidth: 20
-  implicitHeight: 20
+  property color ink: theme.text
+  // Set for icons that point along the reading direction, so they point the other way in right-to-left languages.
+  property bool directional: false
+  implicitWidth: Style.space(20)
+  implicitHeight: Style.space(20)
+  RecallTheme { id: theme }
+  transform: Scale {
+    origin.x: icon.width / 2
+    xScale: icon.directional && icon.LayoutMirroring.enabled ? -1 : 1
+  }
   onNameChanged: requestPaint()
   onInkChanged: requestPaint()
   onWidthChanged: requestPaint()

@@ -37,7 +37,8 @@ impl Fixture {
             self.command()
                 .arg("daemon")
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
+                // Kept in the fixture's folder, so a test that fails can say what the daemon reported.
+                .stderr(fs::File::create(self.dir.path().join("daemon.log")).unwrap())
                 .spawn()
                 .unwrap(),
         );
@@ -47,6 +48,10 @@ impl Fixture {
             assert!(self.daemon.as_mut().unwrap().try_wait().unwrap().is_none());
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+    /// What the daemon wrote to stderr so far.
+    fn daemon_log(&self) -> String {
+        fs::read_to_string(self.dir.path().join("daemon.log")).unwrap_or_default()
     }
     fn rpc(&self, value: Value) -> Value {
         let mut socket =
@@ -104,11 +109,9 @@ fn cli_validates_before_contacting_service() {
         vec!["text", "0"],
     ] {
         let out = f.command().args(arguments).output().unwrap();
-        assert_eq!(out.status.code(), Some(2));
-        assert!(serde_json::from_slice::<Value>(&out.stdout)
-            .unwrap()
-            .get("error")
-            .is_some());
+        assert_eq!(out.status.code(), Some(1));
+        assert!(out.stdout.is_empty());
+        assert_eq!(serde_json::from_slice::<Value>(&out.stderr).unwrap()["kind"], "usage");
     }
     let output = f.command().arg("status").output().unwrap();
     assert_eq!(output.status.code(), Some(1));
@@ -423,12 +426,8 @@ fn empty_selections_and_exclusions_hide_retained_hits_and_passages() {
         assert!(Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert!(
-        fixture.rpc(json!({"op":"search","query":"retained","meaning":false}))["hits"]
-            .as_array()
-            .unwrap()
-            .is_empty()
-    );
+    let reply = fixture.rpc(json!({"op":"search","query":"retained","meaning":false}));
+    assert!(reply["hits"].as_array().unwrap_or_else(|| panic!("{reply}")).is_empty());
     assert!(fixture.rpc(json!({"op":"text","segment":segment}))["text"].is_null());
 }
 
@@ -439,12 +438,20 @@ fn installation(at: &std::path::Path) -> std::path::PathBuf {
     fs::copy(CLI, release.join("recall")).unwrap();
     fs::copy(env!("CARGO_BIN_EXE_recall-engine"), release.join("recall-engine")).unwrap();
     let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("omarchy");
-    for folder in ["plugin", "assets"] {
-        fs::create_dir_all(at.join("omarchy").join(folder)).unwrap();
-        for entry in fs::read_dir(source.join(folder)).unwrap() {
+    // The panel has a folder of its own inside (its catalogs), so folders are copied whole.
+    fn copy_folder(from: &std::path::Path, to: &std::path::Path) {
+        fs::create_dir_all(to).unwrap();
+        for entry in fs::read_dir(from).unwrap() {
             let entry = entry.unwrap();
-            fs::copy(entry.path(), at.join("omarchy").join(folder).join(entry.file_name())).unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                copy_folder(&entry.path(), &to.join(entry.file_name()));
+            } else {
+                fs::copy(entry.path(), to.join(entry.file_name())).unwrap();
+            }
         }
+    }
+    for folder in ["plugin", "assets"] {
+        copy_folder(&source.join(folder), &at.join("omarchy").join(folder));
     }
     release.join("recall")
 }
@@ -665,7 +672,8 @@ fn the_default_is_never_frozen_into_settings_and_there_is_a_way_back_to_it() {
 
     // Still refused, and the settings are untouched.
     let relative = f.command().args(["config", "set", "models_directory", "\"relative\""]).output().unwrap();
-    assert_eq!(relative.status.code(), Some(2));
+    assert_eq!(relative.status.code(), Some(1));
+    assert_eq!(serde_json::from_slice::<Value>(&relative.stderr).unwrap()["kind"], "usage");
     assert!(f.saved().get("models_directory").is_none());
 }
 
@@ -690,4 +698,132 @@ fn the_daemon_uses_a_legacy_folder_until_its_files_are_dealt_with() {
     assert!(!legacy.join(text.name).exists());
     assert!(!f.dir.path().join(".cache/huggingface/hub").join(SNAPSHOT).join(recall::model_files::REVISION).join(text.name).exists());
     assert_eq!(f.rpc(json!({"op":"capabilities","api":1}))["models_directory"], f.pinned());
+}
+
+#[test]
+fn a_failure_is_one_json_object_on_stderr_with_a_stable_kind_and_exit_status_1() {
+    let mut f = Fixture::new();
+    // Each failure leaves stdout empty and says what went wrong, and what kind of wrong, in one object on stderr.
+    let failed = |arguments: &[&str]| -> Value {
+        let out = f.command().args(arguments).output().unwrap();
+        assert_eq!(out.status.code(), Some(1), "{arguments:?}");
+        assert!(out.stdout.is_empty(), "{arguments:?} wrote to stdout: {}", String::from_utf8_lossy(&out.stdout));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(stderr.lines().count(), 1, "{arguments:?}: {stderr}");
+        let reply: Value = serde_json::from_str(&stderr).unwrap();
+        assert!(reply["error"].as_str().is_some_and(|error| !error.is_empty()), "{reply}");
+        reply
+    };
+    // No service is running in this fixture yet.
+    let reply = failed(&["status"]);
+    assert_eq!(reply["kind"], "unavailable");
+    assert!(reply["error"].as_str().unwrap().starts_with("Search service unavailable"), "{reply}");
+    // Argument errors, refused before anything is contacted.
+    for arguments in [
+        &["search", "x", "--limit", "101"][..],
+        &["config", "set", "encoder_idle_seconds", "0"],
+        &["config", "set", "roots", "not json"],
+        &["config", "set"],
+        &["skill", "bogus"],
+        &["bogus"],
+    ] {
+        assert_eq!(failed(arguments)["kind"], "usage", "{arguments:?}");
+    }
+    // The service answers, and its answer is an error.
+    f.start();
+    let out = f.command().args(["forget", "no spaces allowed"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    assert_eq!(serde_json::from_slice::<Value>(&out.stderr).unwrap()["kind"], "service");
+    // Success writes its JSON to stdout and nothing to stderr.
+    let out = f.command().arg("config").output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(serde_json::from_slice::<Value>(&out.stdout).unwrap().get("roots").is_some());
+    assert!(out.stderr.is_empty());
+}
+
+/// Send lines through `recall client`, as the panel does, and collect the replies.
+fn through_client(f: &Fixture, requests: &[Value]) -> (Vec<Value>, String) {
+    let mut child =
+        f.command().arg("client").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let mut input = child.stdin.take().unwrap();
+    for request in requests {
+        writeln!(input, "{request}").unwrap();
+    }
+    drop(input);
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    let replies = String::from_utf8_lossy(&out.stdout).lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    (replies, String::from_utf8_lossy(&out.stderr).into_owned())
+}
+
+#[test]
+fn the_client_marks_a_service_that_is_not_running_apart_from_a_failed_request() {
+    let mut f = Fixture::new();
+    let (replies, stderr) = through_client(&f, &[json!({"op":"status","id":3})]);
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0]["id"], 3);
+    assert_eq!(replies[0]["kind"], "unavailable");
+    assert!(replies[0]["error"].as_str().unwrap().starts_with("Search service unavailable"));
+    assert!(stderr.is_empty(), "the stream the panel reads stays quiet on stderr: {stderr}");
+
+    f.start();
+    let (replies, stderr) = through_client(&f, &[json!({"op":"bogus","id":4}), json!({"op":"status","id":5})]);
+    assert_eq!(replies[0]["id"], 4);
+    assert!(replies[0].get("error").is_some());
+    assert_ne!(replies[0]["kind"], "unavailable", "{}", replies[0]);
+    assert_eq!(replies[1]["id"], 5);
+    assert!(replies[1].get("error").is_none());
+    assert!(stderr.is_empty());
+}
+
+#[test]
+fn saved_settings_reach_a_running_daemon_by_event_not_by_a_timer() {
+    let mut f = Fixture::new();
+    f.start();
+    assert_eq!(f.rpc(json!({"op":"status"}))["paused"], false);
+    // Six saves in a row, each waited for. Read on a one-second timer they took three seconds on average; told by the
+    // file's own event each takes a few milliseconds.
+    let started = Instant::now();
+    for seconds in 31..37 {
+        let set = f.command().args(["config", "set", "encoder_idle_seconds", &seconds.to_string()]).output().unwrap();
+        assert!(set.status.success());
+        while f.rpc(json!({"op":"config"}))["config"]["encoder_idle_seconds"] != seconds {
+            assert!(started.elapsed() < Duration::from_secs(20), "the daemon never applied the saved settings");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    assert!(started.elapsed() < Duration::from_secs(2), "six saves took {:?}", started.elapsed());
+}
+
+#[test]
+fn resuming_starts_the_indexer_at_once() {
+    let mut f = Fixture::new();
+    let folder = f.dir.path().join("files");
+    fs::create_dir(&folder).unwrap();
+    let mut config = f.saved();
+    config["roots"] = json!([folder]);
+    fs::write(f.settings_path(), config.to_string()).unwrap();
+    f.start();
+    // Each indexer the daemon starts syncs first and reports when that sync began. Without model files it then exits
+    // by itself within milliseconds, so a new `started` is what shows a launch, not a process that may be gone already.
+    let started = || f.rpc(json!({"op":"status"}))["started"].as_f64();
+    let wait_for = |launched: &dyn Fn(Option<f64>) -> bool, what: &str| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !launched(started()) {
+            assert!(Instant::now() < deadline, "{what}; status {}; the daemon said: {}", f.rpc(json!({"op":"status"})), f.daemon_log());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    wait_for(&|at| at.is_some(), "the indexer never started");
+    assert_eq!(f.rpc(json!({"op":"pause","paused":true}))["ok"], true, "pausing an indexer that already exited is fine");
+    // Anything already under way has reported by now; a paused daemon starts nothing new.
+    std::thread::sleep(Duration::from_millis(300));
+    let before = started().unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(started(), Some(before), "a paused daemon started the indexer");
+    // Nothing changes in the folder and no timer is near (the next rescan is minutes away), so only the request's own
+    // wake can start it again.
+    assert_eq!(f.rpc(json!({"op":"pause","paused":false}))["ok"], true);
+    wait_for(&|at| at.is_some_and(|at| at > before), "resuming did not start the indexer");
 }

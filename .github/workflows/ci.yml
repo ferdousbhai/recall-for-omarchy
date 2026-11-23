@@ -1,7 +1,8 @@
 name: CI
 on:
+  # Every push to any branch, so a change is checked before it is proposed, and pull requests, which is how changes
+  # from forks arrive.
   push:
-    branches: [main]
   pull_request:
 permissions:
   contents: read
@@ -21,7 +22,11 @@ jobs:
         with:
           toolchain: ${{ matrix.toolchain }}
           components: clippy
+      # poppler-utils and tesseract are what tests/folders_and_tools.rs and tests/ocr.rs read PDFs and pictures with.
+      # With CI set (GitHub sets it), those tests fail rather than skip when a tool is missing. The 865 MB embedding
+      # model is not downloaded here, so tests/reference_vectors.rs reports itself skipped; it runs where the model is.
       - run: sudo apt-get update && sudo apt-get install -y tesseract-ocr tesseract-ocr-eng clang cmake ninja-build ffmpeg poppler-utils libvips-tools
+      - run: command -v pdftotext pdftoppm tesseract
       - uses: actions/cache@v4
         with:
           path: Vendor/llama
@@ -37,5 +42,21 @@ jobs:
       - uses: actions/checkout@v4
       - run: |
           bash -n install.sh packaging/PKGBUILD packaging/recall-for-omarchy.install scripts/build-llama.sh omarchy/bundle.sh \
-            bin/arch-run bin/build-packages bin/check bin/collect-packages bin/release bin/validate-models bin/verify-release
+            bin/arch-run bin/build-packages bin/check bin/check-plugin bin/collect-packages bin/release \
+            bin/validate-models bin/verify-release tests/plugin/fake-client
           tests/install_test.sh
+  plugin:
+    runs-on: ubuntu-24.04
+    # The panel is QML for the Omarchy shell, which runs on Arch's Qt 6 and Quickshell, so it is checked on Arch.
+    container: archlinux:latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # A font, because the container has none and the panel's layout is measured in text.
+      - run: pacman -Syu --noconfirm --needed git jq qt6-declarative quickshell ttf-dejavu
+      - uses: actions/checkout@v4
+      # The shell's QML modules (qs.Commons, qs.Ui) and its plugin validator come from Omarchy itself.
+      - run: git clone --depth 1 https://github.com/omacom/omarchy "$RUNNER_TEMP/omarchy"
+      # Manifest validation, qmllint, and the panel loaded and driven offscreen against a stand-in for the daemon.
+      - run: OMARCHY_PATH="$RUNNER_TEMP/omarchy" bin/check-plugin
