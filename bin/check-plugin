@@ -62,7 +62,6 @@ if [[ -n $theme ]]; then
   cp "$colors" "$home/.local/state/omarchy/current/theme/colors.toml"
 fi
 
-failed=0
 # Runs one scene; the second argument is where to save a picture of how it ended.
 scene() {
   local name=$1 shot=${2:-} client=${3:-$PWD/tests/plugin/fake-client} log=$work/$1.log
@@ -77,24 +76,41 @@ scene() {
   if grep -q "HARNESS_OK $name" "$log" && [[ -z $problems ]]; then
     echo "ok   $name${shot:+  $shot}"
   else
-    failed=1
     echo "FAIL $name"
     grep -o "HARNESS_FAIL.*" "$log" || true
     [[ -z $problems ]] || echo "$problems"
     grep -q "HARNESS_" "$log" || tail -n 15 "$log"
+    return 1
   fi
+}
+
+# Each scene is a Quickshell of its own with its own log, so they run side by side: `beside` starts one, and `gather`
+# waits for them all and prints what each said, in the order they were started.
+failed=0 names=() pids=()
+beside() {
+  scene "$@" >"$work/$1.out" 2>&1 &
+  names+=("$1") pids+=($!)
+}
+gather() {
+  local i
+  for i in "${!pids[@]}"; do
+    wait "${pids[i]}" || failed=1
+    cat "$work/${names[i]}.out"
+  done
+  names=() pids=()
 }
 
 if [[ -n $look ]]; then
   mkdir -p "$look"
   look=$(realpath "$look")
-  scene look-search "$look/search.png"
-  scene look-empty "$look/empty.png"
-  scene look-settings "$look/settings.png"
-  scene look-settings-end "$look/settings-end.png"
-  scene look-discard "$look/discard.png"
-  scene look-missing "$look/missing.png" "$work/no-such-recall-client"
-  RECALL_FAKE_MODE=down scene look-down "$look/service-down.png"
+  beside look-search "$look/search.png"
+  beside look-empty "$look/empty.png"
+  beside look-settings "$look/settings.png"
+  beside look-settings-end "$look/settings-end.png"
+  beside look-discard "$look/discard.png"
+  beside look-missing "$look/missing.png" "$work/no-such-recall-client"
+  RECALL_FAKE_MODE=down beside look-down "$look/service-down.png"
+  gather
   exit $failed
 fi
 
@@ -128,10 +144,11 @@ echo "ok   $(ls "$plugin"/*.qml | wc -l) files"
 
 echo "Panel scenes"
 for name in search one-result no-results settings-tab settings-discard settings-discard-confirmed settings-save pause; do
-  scene "$name"
+  beside "$name"
 done
-scene missing-client "" "$work/no-such-recall-client"
-RECALL_FAKE_MODE=down scene service-down
+beside missing-client "" "$work/no-such-recall-client"
+RECALL_FAKE_MODE=down beside service-down
+gather
 
 (( failed == 0 )) || { echo "Plugin checks failed."; exit 1; }
 echo "Plugin checks passed."

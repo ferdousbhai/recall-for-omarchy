@@ -42,6 +42,11 @@ tempfile = "3"
 opt-level = 3
 lto = "thin"
 
+# Checking a model file hashes all of it, and tests/desktop.rs has the daemon check a 555 MB one: unoptimised, that
+# hash alone took 5 to 25 seconds of the test run.
+[profile.dev.package.sha2]
+opt-level = 3
+
 [[bin]]
 name = "recall"
 path = "src/agent_main.rs"

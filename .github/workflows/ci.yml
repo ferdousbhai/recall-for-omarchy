@@ -22,16 +22,21 @@ jobs:
         with:
           toolchain: ${{ matrix.toolchain }}
           components: clippy
-      # poppler-utils and tesseract are what tests/folders_and_tools.rs and tests/ocr.rs read PDFs and pictures with.
-      # With CI set (GitHub sets it), those tests fail rather than skip when a tool is missing. The 865 MB embedding
-      # model is not downloaded here, so tests/reference_vectors.rs reports itself skipped; it runs where the model is.
-      - run: sudo apt-get update && sudo apt-get install -y tesseract-ocr tesseract-ocr-eng clang cmake ninja-build ffmpeg poppler-utils libvips-tools
-      - run: command -v pdftotext pdftoppm tesseract
+      # poppler-utils and tesseract are what tests/folders_and_tools.rs and tests/ocr.rs read PDFs and pictures with,
+      # and ffmpeg what the tests in src/media.rs cut a clip with. With CI set (GitHub sets it), the first two fail
+      # rather than skip when a tool is missing. The 865 MB embedding model is not downloaded here, so
+      # tests/reference_vectors.rs reports itself skipped; it runs where the model is.
+      # Only what the tests run is installed: this step is the longest of the job, and once took 24 minutes from a
+      # slow mirror. Recommended packages (a 27 MB speech model, video drivers and a Mesa upgrade for them) are left
+      # out, and so is vips, which no test calls.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng clang ffmpeg poppler-utils
+      - run: command -v pdftotext pdftoppm tesseract ffmpeg
       - uses: actions/cache@v4
         with:
           path: Vendor/llama
           key: llama-${{ runner.os }}-${{ hashFiles('scripts/build-llama.sh', 'scripts/llama.cpp-no-logits.patch') }}
-      - run: test -f Vendor/llama/lib/libllama.so || scripts/build-llama.sh
+      # CMake and Ninja are needed only to build llama.cpp, which the cache above nearly always has.
+      - run: test -f Vendor/llama/lib/libllama.so || { sudo apt-get install -y cmake ninja-build && scripts/build-llama.sh; }
       - run: cargo build --locked --all-targets
       - run: cargo test --locked
       - if: matrix.toolchain == '1.89' # newer stable clippy adds lints; pin to keep CI reproducible

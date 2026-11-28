@@ -6,6 +6,15 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH"
 
+# The installer and panel checks use neither cargo nor each other's files, so they run beside the Rust steps and say
+# what they found after them.
+logs=$(mktemp -d)
+trap 'wait; rm -rf "${logs:?}"' EXIT
+tests/install_test.sh >"$logs/installer" 2>&1 &
+installer=$!
+bin/check-plugin >"$logs/plugin" 2>&1 &
+plugin=$!
+
 scripts/build-llama.sh
 cargo build --locked --all-targets
 cargo test --locked
@@ -14,7 +23,11 @@ cargo clippy --locked --all-targets -- -D warnings
 bash -n install.sh packaging/PKGBUILD packaging/recall-for-omarchy.install scripts/build-llama.sh omarchy/bundle.sh \
   bin/arch-run bin/build-packages bin/check bin/check-plugin bin/collect-packages bin/release bin/validate-models \
   bin/verify-release tests/install_test.sh tests/plugin/fake-client
-tests/install_test.sh
-bin/check-plugin
+failed=0
+wait "$installer" || failed=1
+cat "$logs/installer"
+wait "$plugin" || failed=1
+cat "$logs/plugin"
+(( failed == 0 )) || exit 1
 
 printf '\nAll checks passed.\n'
