@@ -39,8 +39,8 @@ Canvas {
     } else if (name === "play" || name === "video") {
       c.moveTo(8, 5); c.lineTo(19, 12); c.lineTo(8, 19); c.closePath()
     } else if (name === "settings") {
-      for (var i = 0; i < 3; i++) {
-        var y = 6 + i * 6; var x = i === 1 ? 15 : 9
+      for (let i = 0; i < 3; i++) {
+        const y = 6 + i * 6; const x = i === 1 ? 15 : 9
         line(4, y, x - 2, y); line(x + 2, y, 20, y)
         c.moveTo(x + 2, y); c.arc(x, y, 2, 0, Math.PI * 2)
       }
